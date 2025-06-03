@@ -1,0 +1,101 @@
+version: '3.8'
+
+services:
+  # Main Application Server
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: email-processor-app
+    ports:
+      - "3000:3000"
+    environment:
+      - NODE_ENV=development
+      - PORT=3000
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - email-processor-network
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Background Job Workers
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+      target: development
+    container_name: email-processor-worker
+    environment:
+      - NODE_ENV=development
+      - WORKER_MODE=true
+    env_file:
+      - .env
+    volumes:
+      - .:/app
+      - /app/node_modules
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - email-processor-network
+    command: npm run start:worker
+    healthcheck:
+      test: ["CMD", "node", "scripts/worker-health-check.js"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+      start_period: 40s
+
+  # Redis Queue Database
+  redis:
+    image: redis:7-alpine
+    container_name: email-processor-redis
+    ports:
+      - "6379:6379"
+    command: redis-server --appendonly yes --requirepass ${REDIS_PASSWORD:-devpassword}
+    volumes:
+      - redis_data:/data
+    restart: unless-stopped
+    networks:
+      - email-processor-network
+    healthcheck:
+      test: ["CMD", "redis-cli", "--raw", "incr", "ping"]
+      interval: 30s
+      timeout: 3s
+      retries: 5
+
+  # Redis Admin UI (Development Only)
+  redis-commander:
+    image: rediscommander/redis-commander:latest
+    container_name: email-processor-redis-ui
+    environment:
+      - REDIS_HOSTS=local:redis:6379:0:${REDIS_PASSWORD:-devpassword}
+    ports:
+      - "8081:8081"
+    depends_on:
+      - redis
+    restart: unless-stopped
+    networks:
+      - email-processor-network
+    profiles:
+      - tools
+
+volumes:
+  redis_data:
+    driver: local
+
+networks:
+  email-processor-network:
+    driver: bridge 
