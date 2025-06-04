@@ -839,7 +839,10 @@ export class JiraService {
       }
 
       if (ticketData.assignee) {
-        createData.fields.assignee = { emailAddress: ticketData.assignee };
+        this.logger.log(`🎯 ASSIGNMENT: Setting assignee to ${ticketData.assignee}`);
+        createData.fields.assignee = { accountId: ticketData.assignee };
+      } else {
+        this.logger.warn(`⚠️ ASSIGNMENT: No assignee provided, ticket will be unassigned`);
       }
 
       if (ticketData.dueDate) {
@@ -861,9 +864,32 @@ export class JiraService {
 
       try {
         this.logger.log(`📤 Creating ticket with fields: ${Object.keys(createData.fields).join(', ')}`);
+        this.logger.log(`📋 Full ticket data being sent to JIRA:`);
+        this.logger.log(`   Summary: ${createData.fields.summary}`);
+        this.logger.log(`   Issue Type: ${createData.fields.issuetype.name}`);
+        this.logger.log(`   Priority: ${createData.fields.priority?.name || 'None'}`);
+        this.logger.log(`   Assignee: ${createData.fields.assignee?.accountId || 'Unassigned'}`);
+        this.logger.log(`   Project: ${createData.fields.project.key}`);
+        
         const response = await httpClient.post('/issue', createData);
         const newTicket = response.data;
         this.logger.log(`✅ Successfully created JIRA ticket: ${newTicket.key}`);
+        
+        // Verify assignment was successful
+        if (ticketData.assignee) {
+          this.logger.log(`🔍 Verifying assignment for ticket ${newTicket.key}...`);
+          try {
+            const checkResponse = await httpClient.get(`/issue/${newTicket.key}?fields=assignee`);
+            const actualAssignee = checkResponse.data.fields.assignee;
+            if (actualAssignee && actualAssignee.accountId === ticketData.assignee) {
+              this.logger.log(`✅ ASSIGNMENT VERIFIED: Ticket ${newTicket.key} successfully assigned to ${actualAssignee.displayName} (${actualAssignee.accountId})`);
+            } else {
+              this.logger.error(`❌ ASSIGNMENT FAILED: Ticket ${newTicket.key} shows assignee as ${actualAssignee?.displayName || 'UNASSIGNED'} (${actualAssignee?.accountId || 'NO-ID'}), expected ${ticketData.assignee}`);
+            }
+          } catch (checkError) {
+            this.logger.error(`❌ Failed to verify assignment for ticket ${newTicket.key}: ${checkError.message}`);
+          }
+        }
 
         // Upload attachments after ticket creation
         if (ticketData.attachments && ticketData.attachments.length > 0) {
@@ -924,7 +950,7 @@ export class JiraService {
               description: createData.fields.description,
               issuetype: { name: ticketData.issueType },
               ...(ticketData.priority && { priority: { name: ticketData.priority } }),
-              ...(ticketData.assignee && { assignee: { emailAddress: ticketData.assignee } }),
+              ...(ticketData.assignee && { assignee: { accountId: ticketData.assignee } }),
             },
           };
           
@@ -999,9 +1025,7 @@ export class JiraService {
       }
 
       if (updateData.assignee) {
-        updateFields.assignee = {
-          emailAddress: updateData.assignee,
-        };
+        updateFields.assignee = { accountId: updateData.assignee };
       }
 
       if (updateData.labels) {

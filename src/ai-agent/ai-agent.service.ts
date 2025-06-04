@@ -117,11 +117,32 @@ export class AiAgentService {
       }
 
       let jiraConfig: JiraConfiguration | null = null;
+      let availableUsers: any[] = [];
+      
       if (input.userId && input.organizationId) {
         try {
           jiraConfig = await this.jiraConfigService.getJiraConfig(input.userId, input.organizationId);
           this.logger.log(`JIRA configuration resolved for organization: ${input.organizationId}`);
           trace.decisions.push(`✅ JIRA integration available for organization: ${input.organizationId}`);
+          
+          // ALWAYS fetch users automatically when JIRA is available
+          try {
+            this.logger.log(`🔍 Attempting to fetch users for assignment context...`);
+            availableUsers = await this.jiraService.getProjectUsers(jiraConfig, undefined, true);
+            this.logger.log(`🎯 Auto-fetched ${availableUsers.length} available users for assignment context`);
+            
+            // Log user details for debugging
+            availableUsers.forEach((user, index) => {
+              this.logger.log(`   ${index + 1}. ${user.displayName} (${user.emailAddress}) - ID: ${user.accountId}`);
+            });
+            
+            trace.decisions.push(`👥 Fetched ${availableUsers.length} users for intelligent assignment`);
+          } catch (userError) {
+            this.logger.error(`❌ Failed to fetch users: ${userError.message}`);
+            this.logger.error(`❌ User fetch error details:`, userError);
+            trace.decisions.push(`⚠️ Failed to fetch users: ${userError.message}`);
+          }
+          
         } catch (error) {
           this.logger.warn(`Could not resolve JIRA configuration: ${error.message}`);
           trace.decisions.push(`❌ JIRA integration unavailable: ${error.message}`);
@@ -131,8 +152,21 @@ export class AiAgentService {
         trace.decisions.push('⚠️ No user/organization context - JIRA operations disabled');
       }
 
-      const systemPrompt = this.buildSystemPrompt(jiraConfig);
+      const systemPrompt = this.buildSystemPrompt(jiraConfig, availableUsers);
       const userPrompt = this.buildUserPrompt(input);
+
+      this.logger.log(`🧠 AI CONTEXT SUMMARY:`);
+      this.logger.log(`   Available Users: ${availableUsers.length}`);
+      this.logger.log(`   Email Subject: "${input.subject}"`);
+      this.logger.log(`   Email Body: "${input.textBody.substring(0, 200)}..."`);
+      this.logger.log(`   Mentioned Users from Email: ${trace.emailAnalysis.mentionedUsers.join(', ') || 'None detected'}`);
+      
+      if (availableUsers.length > 0) {
+        this.logger.log(`   User Names Available for Matching:`);
+        availableUsers.forEach((user, i) => {
+          this.logger.log(`     ${i + 1}. "${user.displayName}" (${user.emailAddress}) - ${user.accountId}`);
+        });
+      }
 
       const messages: any[] = [
         { role: 'system', content: systemPrompt },
@@ -403,12 +437,53 @@ export class AiAgentService {
     return icons[toolName] || '🔧';
   }
 
-  private buildSystemPrompt(jiraConfig: JiraConfiguration | null): string {
+  private buildSystemPrompt(jiraConfig: JiraConfiguration | null, availableUsers: any[]): string {
     const sprintsEnabled =
       this.configService.get<string>('ENABLE_SPRINTS') === 'true';
     const smartAssignment =
       this.configService.get<string>('ENABLE_SMART_ASSIGNMENT') === 'true';
     const jiraAvailable = !!jiraConfig;
+
+    // Build user list for assignment context
+    let userListSection = '';
+    if (smartAssignment && availableUsers.length > 0) {
+      userListSection = `
+## 👥 AVAILABLE TEAM MEMBERS FOR ASSIGNMENT
+
+${availableUsers.map((user, index) => `
+${index + 1}. **${user.displayName}** (${user.emailAddress})
+   - Account ID: ${user.accountId}
+   - Username: ${user.username || 'N/A'}
+   - Status: ${user.active ? 'Active' : 'Inactive'}
+   - Roles: ${user.roles?.join(', ') || 'N/A'}
+`).join('')}
+
+## 🎯 ASSIGNMENT INSTRUCTIONS
+
+**CRITICAL:** When creating or updating tickets, you MUST assign them using this process:
+
+1. **Analyze email for name mentions:** Look for any names mentioned in the email text (case-insensitive)
+2. **Match to available users:** Find the best match from the user list above using:
+   - Display name matching (e.g., "younes" → "Younes Idrissi") 
+   - Email prefix matching (e.g., "younes" → "younes.smith@company.com")
+   - Username matching
+3. **Use the EXACT Account ID** from the list above as the assignee value
+
+**Example matching:**
+- Email says "tell younes to fix" → Find user with displayName containing "younes" → Use their Account ID
+- Email says "assign to sarah" → Find user with displayName containing "sarah" → Use their Account ID  
+- Email says "@john.doe" → Find user with emailAddress "john.doe@company.com" → Use their Account ID
+
+**ALWAYS USE THE ACCOUNT ID FROM THE USER LIST ABOVE - NOT THE EMAIL ADDRESS, DISPLAY NAME, OR USERNAME!**
+
+**DEBUGGING REQUIREMENT:**
+When you create any ticket, you MUST include a comment explaining your assignment decision:
+- "Assigned to [User Display Name] (Account ID: [accountId]) because email mentioned '[mention text]'"
+- If no assignment: "No assignment made because no users were mentioned or matched in the email"
+
+This helps verify the assignment logic is working correctly.
+`;
+    }
 
     return `You are an intelligent AI agent that processes emails and manages JIRA tickets automatically. You have access to powerful tools to search, create, modify JIRA tickets and make intelligent assignments.
 
@@ -420,13 +495,11 @@ export class AiAgentService {
 4. **Make intelligent assignments** - always try to assign tickets to the right person
 5. **Handle attachments properly** - upload and reference them appropriately
 
+${userListSection}
+
 ## 📋 PROFESSIONAL JIRA TICKET FORMAT
 
 When creating tickets, descriptions will be automatically converted from markdown to proper JIRA format (ADF). Use clear markdown formatting:
-
-**Summary**: Clear, actionable title (max 80 characters)
-
-**Description**: Use this professional markdown format:
 \`\`\`markdown
 ## Problem Statement
 [Describe the issue based ONLY on email content]
@@ -475,48 +548,6 @@ When creating tickets, descriptions will be automatically converted from markdow
 **Component Selection** (only if clearly identifiable):
 - Frontend/UI, Backend/API, Database, Infrastructure, Authentication, etc.
 
-## 🎯 MANDATORY SMART ASSIGNMENT WORKFLOW
-
-${smartAssignment ? `⚠️ **CRITICAL**: For ALL new tickets, you MUST follow this assignment process:
-
-### STEP 1: ALWAYS GET USERS FIRST
-**REQUIRED**: Use get_project_users BEFORE creating any new ticket to fetch ALL available team members
-
-### STEP 2: ANALYZE EMAIL FOR NAME MENTIONS  
-Look for ANY names mentioned in the email:
-- Direct mentions: "tell younes to fix", "assign to sarah", "john should handle this"
-- Casual mentions: "younes is working on this", "talk to mike about it"
-- @ mentions: "@younes", "@john.doe"
-
-### STEP 3: INTELLIGENT NAME MATCHING
-**CRITICAL**: When you find names in email, search through users list thoroughly:
-- Match displayName field: "younes" → "Younes Idrissi" 
-- Match emailAddress: "younes" → "younes.smith@company.com"
-- Match username: "younes" → "younes123"
-- Use case-insensitive partial matching
-- Try variations: "john" matches "John", "Johnny", "Johnathan"
-
-### STEP 4: GET ASSIGNMENT SUGGESTIONS
-**REQUIRED**: Use suggest_assignee tool with ticket context to get intelligent recommendations
-
-### STEP 5: MAKE ASSIGNMENT DECISION
-Based on priority order:
-1. **EXPLICIT EMAIL MENTIONS** (highest priority) → If email says "tell younes to fix" → assign to younes
-2. **AI SUGGESTIONS** → Use suggest_assignee results for best match
-3. **LEAVE UNASSIGNED** → Only if no clear match found
-
-### STEP 6: CREATE TICKET WITH ASSIGNMENT
-When creating the ticket, ALWAYS include assignee field if you found a match
-
-**EXAMPLE WORKFLOW**:
-1. Email: "our modals are broken. tell younes to fix"
-2. Call get_project_users → Get all users
-3. Find "younes" in users list (match "Younes Idrissi")
-4. Call suggest_assignee for additional context
-5. Create ticket WITH assignee: "younes.idrissi@company.com"
-
-**YOU MUST ATTEMPT ASSIGNMENT FOR EVERY NEW TICKET - NO EXCEPTIONS!**` : ''}
-
 IMPORTANT WORKFLOW - Follow this order:
 
 ${jiraAvailable ? `1. **FIRST ALWAYS SEARCH**: Before creating any new tickets, ALWAYS use read_jira_tickets to search for existing related tickets (search recent tickets from last 14-30 days)
@@ -533,25 +564,11 @@ ${jiraAvailable ? `1. **FIRST ALWAYS SEARCH**: Before creating any new tickets, 
    - If email is related to existing ticket → update or comment on existing ticket
    - ONLY create new tickets if no related existing tickets are found
 
-${
-  smartAssignment
-    ? `4. **MANDATORY ASSIGNMENT PROCESS FOR NEW TICKETS**:
-   - **STEP 1**: Call get_project_users (REQUIRED)
-   - **STEP 2**: Search email for mentioned names (case-insensitive)
-   - **STEP 3**: Match names to users in the team list
-   - **STEP 4**: Call suggest_assignee for AI recommendations
-   - **STEP 5**: Make assignment decision (mentioned names take priority)
-   - **STEP 6**: Create ticket WITH assignee field populated`
-    : ''
-}
-
-5. **USE MARKDOWN**: Always format descriptions with proper markdown for better readability in JIRA` : ''}
+4. **USE MARKDOWN**: Always format descriptions with proper markdown for better readability in JIRA` : ''}
 
 ## 🔧 TOOL USAGE GUIDELINES
 
 - **read_jira_tickets**: Search for existing tickets before creating new ones
-- **get_project_users**: Get team members (MANDATORY for new tickets with smart assignment)
-- **suggest_assignee**: Get AI assignment recommendations (MANDATORY for new tickets with smart assignment)  
 - **create_jira_ticket**: Create new tickets with professional formatting and assignments
 - **modify_jira_ticket**: Update existing tickets, add comments, change status
 - **get_active_sprint**: Get current sprint information if sprint management is enabled
@@ -900,29 +917,6 @@ Please analyze this email and take appropriate actions. Pay special attention to
           {
             type: 'function' as const,
             function: {
-              name: 'get_project_users',
-              description:
-                'Get all users who have access to the JIRA project with their roles and information',
-              parameters: {
-                type: 'object',
-                properties: {
-                  role: {
-                    type: 'string',
-                    description:
-                      'Filter by role (optional, e.g., "developer", "admin")',
-                  },
-                  activeOnly: {
-                    type: 'boolean',
-                    description: 'Only return active users (default: true)',
-                  },
-                },
-                required: [],
-              },
-            },
-          },
-          {
-            type: 'function' as const,
-            function: {
               name: 'get_user_workload',
               description:
                 'Get current workload information for specific users',
@@ -942,38 +936,6 @@ Please analyze this email and take appropriate actions. Pay special attention to
                   },
                 },
                 required: ['userAccountIds'],
-              },
-            },
-          },
-          {
-            type: 'function' as const,
-            function: {
-              name: 'suggest_assignee',
-              description:
-                'Get AI suggestion for the best assignee based on ticket context and team workload',
-              parameters: {
-                type: 'object',
-                properties: {
-                  ticketType: {
-                    type: 'string',
-                    description: 'Type of ticket (Bug, Story, Task, etc.)',
-                  },
-                  technologies: {
-                    type: 'array',
-                    items: { type: 'string' },
-                    description:
-                      'Array of technologies mentioned in the ticket',
-                  },
-                  priority: {
-                    type: 'string',
-                    description: 'Ticket priority level',
-                  },
-                  component: {
-                    type: 'string',
-                    description: 'Component or area affected (optional)',
-                  },
-                },
-                required: ['ticketType'],
               },
             },
           },
@@ -1069,6 +1031,14 @@ Please analyze this email and take appropriate actions. Pay special attention to
             if (!jiraConfig) {
               toolResult = { error: 'JIRA not available - no organization context' };
             } else {
+              this.logger.log(`🔍 AI CREATE TICKET ARGUMENTS:`);
+              this.logger.log(`   Summary: ${parsedArgs.summary}`);
+              this.logger.log(`   Issue Type: ${parsedArgs.issueType}`);
+              this.logger.log(`   Priority: ${parsedArgs.priority || 'Not specified'}`);
+              this.logger.log(`   Assignee (from AI): ${parsedArgs.assignee || 'NOT PROVIDED BY AI'}`);
+              this.logger.log(`   Labels: ${parsedArgs.labels?.join(', ') || 'None'}`);
+              this.logger.log(`   Components: ${parsedArgs.components?.join(', ') || 'None'}`);
+              
               toolResult = await this.executeCreateTicket(jiraConfig, parsedArgs, emailInput);
               result.jiraTicketsCreated?.push(toolResult.ticket_key);
               this.logger.log(`   🆕 Created ticket ${toolResult.ticket_key}: "${parsedArgs.summary}"`);
@@ -1087,36 +1057,6 @@ Please analyze this email and take appropriate actions. Pay special attention to
               this.logger.log(`   ✏️ Modified ticket ${parsedArgs.ticketKey}`);
               if (toolResult.attachments_uploaded > 0) {
                 this.logger.log(`   📎 Added ${toolResult.attachments_uploaded} new attachments`);
-              }
-            }
-            break;
-
-          case 'get_project_users':
-            if (!jiraConfig) {
-              toolResult = { error: 'JIRA not available - no organization context' };
-            } else {
-              toolResult = await this.executeGetProjectUsers(jiraConfig, parsedArgs);
-              this.logger.log(`   👥 Retrieved ${toolResult.count} team members`);
-            }
-            break;
-
-          case 'get_user_workload':
-            if (!jiraConfig) {
-              toolResult = { error: 'JIRA not available - no organization context' };
-            } else {
-              toolResult = await this.executeGetUserWorkload(jiraConfig, parsedArgs);
-              this.logger.log(`   📊 Analyzed workload for ${toolResult.count} users`);
-            }
-            break;
-
-          case 'suggest_assignee':
-            if (!jiraConfig) {
-              toolResult = { error: 'JIRA not available - no organization context' };
-            } else {
-              toolResult = await this.executeSuggestAssignee(jiraConfig, parsedArgs, emailInput);
-              const topSuggestion = toolResult.suggestion?.suggestions?.[0];
-              if (topSuggestion) {
-                this.logger.log(`   🎯 Top assignee suggestion: ${topSuggestion.user.displayName} (score: ${topSuggestion.score})`);
               }
             }
             break;
@@ -1140,6 +1080,15 @@ Please analyze this email and take appropriate actions. Pay special attention to
               } else {
                 this.logger.log(`   🚫 No active sprint found`);
               }
+            }
+            break;
+
+          case 'get_user_workload':
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeGetUserWorkload(jiraConfig, parsedArgs);
+              this.logger.log(`   📊 Analyzed workload for ${toolResult.count} users`);
             }
             break;
 
@@ -1283,86 +1232,6 @@ Please analyze this email and take appropriate actions. Pay special attention to
     };
   }
 
-  private async executeGetProjectUsers(jiraConfig: JiraConfiguration, args: any): Promise<any> {
-    const users = await this.jiraService.getProjectUsers(
-      jiraConfig,
-      args.role,
-      args.activeOnly,
-    );
-    return {
-      users: users.map((user) => ({
-        accountId: user.accountId,
-        username: user.username,
-        emailAddress: user.emailAddress,
-        displayName: user.displayName,
-        roles: user.roles,
-      })),
-      count: users.length,
-      summary: `Found ${users.length} JIRA users`,
-    };
-  }
-
-  private async executeGetUserWorkload(jiraConfig: JiraConfiguration, args: any): Promise<any> {
-    const workloads = await this.jiraService.getUserWorkloads(
-      jiraConfig,
-      args.userAccountIds,
-      args.includeInProgress,
-    );
-    return {
-      workloads: Object.values(workloads).map((w) => ({
-        accountId: w.accountId,
-        username: w.username,
-        displayName: w.displayName,
-        totalTickets: w.totalTickets,
-        inProgressTickets: w.inProgressTickets,
-        todoTickets: w.todoTickets,
-        storyPoints: w.storyPoints,
-        overdue: w.overdue,
-      })),
-      count: Object.keys(workloads).length,
-      summary: `Found workloads for ${Object.keys(workloads).length} users`,
-    };
-  }
-
-  private async executeSuggestAssignee(jiraConfig: JiraConfiguration, args: any, emailInput: EmailProcessingInput): Promise<any> {
-    const suggestionData = await this.jiraService.suggestAssignee(
-      jiraConfig,
-      args.ticketType, 
-      args.technologies || [], 
-      args.priority || 'Medium', 
-      args.component
-    );
-    
-    // Also analyze the email for mentioned names to help AI make better decisions
-    const mentionedNames = this.extractMentionedUsers(`${emailInput.subject} ${emailInput.textBody}`);
-    
-    return {
-      availableUsers: suggestionData.users.map(user => ({
-        accountId: user.accountId,
-        displayName: user.displayName,
-        emailAddress: user.emailAddress,
-        username: user.username,
-        active: user.active,
-        roles: user.roles || [],
-        workload: suggestionData.workloads[user.accountId] || {
-          totalTickets: 0,
-          inProgressTickets: 0,
-          todoTickets: 0,
-          storyPoints: 0,
-          overdue: 0
-        }
-      })),
-      context: suggestionData.context,
-      emailContext: {
-        mentionedNames: mentionedNames,
-        from: emailInput.from,
-        subject: emailInput.subject,
-        bodySnippet: emailInput.textBody.substring(0, 200)
-      },
-      summary: `Retrieved ${suggestionData.users.length} available users with workload data for intelligent assignment decision`,
-    };
-  }
-
   private async executeGetSprints(jiraConfig: JiraConfiguration, args: any): Promise<any> {
     const sprints = await this.jiraService.getSprints(jiraConfig, args.state);
     return {
@@ -1400,6 +1269,28 @@ Please analyze this email and take appropriate actions. Pay special attention to
         summary: 'No active JIRA sprint found',
       };
     }
+  }
+
+  private async executeGetUserWorkload(jiraConfig: JiraConfiguration, args: any): Promise<any> {
+    const workloads = await this.jiraService.getUserWorkloads(
+      jiraConfig,
+      args.userAccountIds,
+      args.includeInProgress,
+    );
+    return {
+      workloads: Object.values(workloads).map((w) => ({
+        accountId: w.accountId,
+        username: w.username,
+        displayName: w.displayName,
+        totalTickets: w.totalTickets,
+        inProgressTickets: w.inProgressTickets,
+        todoTickets: w.todoTickets,
+        storyPoints: w.storyPoints,
+        overdue: w.overdue,
+      })),
+      count: Object.keys(workloads).length,
+      summary: `Found workloads for ${Object.keys(workloads).length} users`,
+    };
   }
 }
  

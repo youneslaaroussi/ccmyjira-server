@@ -558,11 +558,11 @@ export class DashboardController {
         availableUsers: {
           type: 'array',
           items: {
-            type: 'object',
-            properties: {
-              accountId: { type: 'string', example: 'user123' },
-              displayName: { type: 'string', example: 'John Doe' },
-              emailAddress: { type: 'string', example: 'john.doe@company.com' },
+                type: 'object',
+                properties: {
+                  accountId: { type: 'string', example: 'user123' },
+                  displayName: { type: 'string', example: 'John Doe' },
+                  emailAddress: { type: 'string', example: 'john.doe@company.com' },
               username: { type: 'string', example: 'john.doe' },
               active: { type: 'boolean', example: true },
               roles: { type: 'array', items: { type: 'string' }, example: ['Developers'] },
@@ -576,9 +576,9 @@ export class DashboardController {
                   overdue: { type: 'number', example: 1 },
                 },
               },
+              },
             },
           },
-        },
         context: {
           type: 'object',
           properties: {
