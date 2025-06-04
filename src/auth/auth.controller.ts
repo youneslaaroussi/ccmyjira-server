@@ -18,7 +18,7 @@ import { ConfigService } from '@nestjs/config';
 import { ApiTags, ApiOperation, ApiResponse, ApiBearerAuth, ApiBody, ApiQuery } from '@nestjs/swagger';
 import { Request, Response } from 'express';
 import { AuthService } from './auth.service';
-import { JwtAuthGuard } from './jwt-auth.guard';
+import { DemoJwtAuthGuard } from './demo-jwt-auth.guard';
 
 @ApiTags('Authentication')
 @Controller('auth')
@@ -110,11 +110,11 @@ export class AuthController {
    * Get current user profile
    */
   @Get('me')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ 
     summary: 'Get current user',
-    description: 'Returns the current authenticated user profile (or demo user if in demo mode)'
+    description: 'Returns the current authenticated user profile. In demo mode (/demo/auth/me), returns demo user data.'
   })
   @ApiResponse({ 
     status: 200, 
@@ -131,26 +131,20 @@ export class AuthController {
             avatarUrl: { type: 'string' }
           }
         },
-        organizations: { type: 'array' },
-        isDemo: { type: 'boolean' }
+        organizations: { type: 'array' }
       }
     }
   })
   async getProfile(@Req() req: any) {
     try {
       const userId = req.user.id;
-      const isDemo = req.isDemo || req.user.isDemo || false;
-      
-      const profile = await this.authService.validateUser(userId, isDemo);
+      const profile = await this.authService.validateUser(userId);
       
       if (!profile) {
         throw new HttpException('User not found', HttpStatus.NOT_FOUND);
       }
 
-      return {
-        ...profile,
-        isDemo,
-      };
+      return profile;
     } catch (error) {
       this.logger.error('❌ Failed to get user profile:', error);
       throw new HttpException('Failed to get profile', HttpStatus.INTERNAL_SERVER_ERROR);
@@ -161,7 +155,7 @@ export class AuthController {
    * Logout user
    */
   @Post('logout')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ 
     summary: 'Log out user',
@@ -252,7 +246,7 @@ export class AuthController {
   }
 
   @Post('verify-domain/initiate')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Initiate domain verification process' })
   @ApiBody({
@@ -277,7 +271,7 @@ export class AuthController {
   }
 
   @Post('verify-domain/confirm')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Verify domain with verification code' })
   @ApiBody({
@@ -326,7 +320,7 @@ export class AuthController {
   }
 
   @Get('domains/status')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Get domain verification status for organization' })
   @ApiQuery({ name: 'organizationId', description: 'Organization ID' })
@@ -340,7 +334,7 @@ export class AuthController {
   }
 
   @Get('organizations/:id/verified-domain')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Check if organization has a verified domain' })
   @ApiResponse({ 
@@ -380,7 +374,7 @@ export class AuthController {
    * Create a new organization
    */
   @Post('organizations')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Create new organization' })
   @ApiBody({
@@ -389,7 +383,7 @@ export class AuthController {
       properties: {
         name: { type: 'string', example: 'Acme Corp' },
         jiraBaseUrl: { type: 'string', example: 'https://acme.atlassian.net' },
-        jiraProjectKey: { type: 'string', example: 'ACME' }
+        jiraProjectKey: { type: 'string', example: 'AC' }
       },
       required: ['name']
     }
@@ -411,56 +405,29 @@ export class AuthController {
    * Get user's organizations
    */
   @Get('organizations')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ 
-    summary: 'Get user organizations',
-    description: 'Returns all organizations the current user belongs to (or demo organization if in demo mode)'
-  })
-  @ApiResponse({
-    status: 200,
-    description: 'Organizations retrieved successfully',
-    schema: {
-      type: 'object',
-      properties: {
-        success: { type: 'boolean' },
-        organizations: { type: 'array' },
-        isDemo: { type: 'boolean' }
-      }
-    }
-  })
+  @ApiOperation({ summary: 'Get user organizations' })
+  @ApiResponse({ status: 200, description: 'User organizations list' })
   async getUserOrganizations(@Req() req: any) {
-    try {
-      const userId = req.user.id;
-      const isDemo = req.isDemo || req.user.isDemo || false;
-      
-      const organizations = await this.authService.getUserOrganizations(userId, isDemo);
-      
-      return {
-        success: true,
-        organizations,
-        isDemo,
-      };
-    } catch (error) {
-      this.logger.error('❌ Failed to get user organizations:', error);
-      throw new HttpException('Failed to get organizations', HttpStatus.INTERNAL_SERVER_ERROR);
-    }
+    const userId = req.user.id;
+    return this.authService.getUserOrganizations(userId);
   }
 
   /**
    * Update organization (including JIRA configuration)
    */
   @Put('organizations/:id')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ summary: 'Update organization' })
   @ApiBody({
     schema: {
       type: 'object',
       properties: {
-        name: { type: 'string', example: 'Acme Corp' },
+        name: { type: 'string', example: 'Updated Acme Corp' },
         jiraBaseUrl: { type: 'string', example: 'https://acme.atlassian.net' },
-        jiraProjectKey: { type: 'string', example: 'ACME' }
+        jiraProjectKey: { type: 'string', example: 'AC' }
       }
     }
   })
@@ -481,11 +448,11 @@ export class AuthController {
   /**
    * Debug Atlassian token and accessibility
    */
-  @Get('debug/atlassian')
-  @UseGuards(JwtAuthGuard)
+  @Get('debug/atlassian-access')
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Debug Atlassian token and access' })
-  @ApiResponse({ status: 200, description: 'Atlassian access debug info' })
+  @ApiOperation({ summary: 'Debug Atlassian access information' })
+  @ApiResponse({ status: 200, description: 'Atlassian access debug information' })
   async debugAtlassianAccess(@Req() req: any) {
     const userId = req.user.id;
     return this.authService.debugAtlassianAccess(userId);
@@ -494,11 +461,11 @@ export class AuthController {
   /**
    * Update organization cloud ID from current token
    */
-  @Post('debug/update-cloud-id/:organizationId')
-  @UseGuards(JwtAuthGuard)
+  @Put('organizations/:organizationId/update-cloud-id')
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Update organization cloud ID from accessible resources' })
-  @ApiResponse({ status: 200, description: 'Cloud ID updated successfully' })
+  @ApiOperation({ summary: 'Update organization JIRA cloud ID' })
+  @ApiResponse({ status: 200, description: 'Organization cloud ID updated successfully' })
   async updateOrganizationCloudId(
     @Param('organizationId') organizationId: string,
     @Req() req: any

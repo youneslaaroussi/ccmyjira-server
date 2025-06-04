@@ -40,18 +40,33 @@ export class EmailProcessor extends WorkerHost {
         );
 
         if (domainLookup) {
-          this.logger.log(
-            `🏢 Found organization: ${domainLookup.organization.name} (${domainLookup.organizationId})`,
-          );
-          this.logger.log(
-            `👤 Using user: ${domainLookup.user.displayName} (${domainLookup.userId})`,
-          );
+          if (domainLookup.isDemoMode) {
+            this.logger.log(
+              `🎭 Demo mode activated for domain: ${domainLookup.domain}`,
+            );
+            this.logger.log(
+              `🏢 Using demo organization: ${domainLookup.organization.name}`,
+            );
+            this.logger.log(
+              `📋 JIRA project: ${domainLookup.organization.jiraProjectKey}`,
+            );
+            this.logger.log(
+              `💡 This domain is not verified - using demo JIRA configuration as fallback`,
+            );
+          } else {
+            this.logger.log(
+              `🏢 Found verified organization: ${domainLookup.organization.name} (${domainLookup.organizationId})`,
+            );
+            this.logger.log(
+              `👤 Using user: ${domainLookup.user.displayName} (${domainLookup.userId})`,
+            );
+          }
         } else {
           this.logger.warn(
-            `⚠️ No verified domain configuration found for email: ${emailData.From}`,
+            `⚠️ No organization configuration found for email: ${emailData.From}`,
           );
           this.logger.warn(
-            `💡 JIRA operations will be disabled. To enable JIRA integration, the domain needs to be verified.`,
+            `💡 JIRA operations will be disabled. To enable JIRA integration, the domain needs to be verified or demo mode configured.`,
           );
         }
       }
@@ -69,6 +84,7 @@ export class EmailProcessor extends WorkerHost {
         // Include organization/user context if found
         userId: domainLookup?.userId,
         organizationId: domainLookup?.organizationId,
+        isDemoMode: domainLookup?.isDemoMode || false,
       });
 
       this.logger.log(`Email processing completed for job ${job.id}:`, result);
@@ -77,8 +93,9 @@ export class EmailProcessor extends WorkerHost {
       if (domainLookup) {
         try {
           // This could be enhanced to log to email_processing_logs table
+          const orgType = domainLookup.isDemoMode ? 'demo organization' : 'organization';
           this.logger.log(
-            `📊 Processing successful for organization ${domainLookup.organization.name}: ${result.summary}`,
+            `📊 Processing successful for ${orgType} ${domainLookup.organization.name}: ${result.summary}`,
           );
         } catch (logError) {
           this.logger.warn('Failed to log processing result:', logError);

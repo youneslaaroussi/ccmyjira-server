@@ -16,6 +16,7 @@ export interface EmailProcessingInput {
   attachments: any[];
   userId?: string;
   organizationId?: string;
+  isDemoMode?: boolean;
 }
 
 export interface EmailProcessingResult {

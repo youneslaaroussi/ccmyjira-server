@@ -8,12 +8,15 @@ import { SupabaseService } from './supabase.service';
 import { AtlassianOAuthStrategy } from './atlassian-oauth.strategy';
 import { JwtStrategy } from './jwt.strategy';
 import { JwtAuthGuard } from './jwt-auth.guard';
+import { DemoJwtAuthGuard } from './demo-jwt-auth.guard';
 import { EmailService } from '../emails/email.service';
 import { JiraModule } from '../jira/jira.module';
+import { CommonModule } from '../common/common.module';
 
 @Module({
   imports: [
     ConfigModule,
+    CommonModule,
     PassportModule.register({ defaultStrategy: 'jwt' }),
     JwtModule.registerAsync({
       imports: [ConfigModule],
@@ -35,12 +38,14 @@ import { JiraModule } from '../jira/jira.module';
     AtlassianOAuthStrategy,
     JwtStrategy,
     JwtAuthGuard,
+    DemoJwtAuthGuard,
   ],
   exports: [
     AuthService,
     SupabaseService,
     EmailService,
     JwtAuthGuard,
+    DemoJwtAuthGuard,
     PassportModule,
     JwtModule,
   ],

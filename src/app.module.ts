@@ -11,6 +11,8 @@ import { DashboardModule } from './dashboard/dashboard.module';
 import { AuthModule } from './auth/auth.module';
 import { DomainModule } from './domain/domain.module';
 import { HealthModule } from './health/health.module';
+import { CommonModule } from './common/common.module';
+import { DemoService } from './common/services/demo.service';
 
 @Module({
   imports: [
@@ -27,6 +29,7 @@ import { HealthModule } from './health/health.module';
         tls: process.env.REDIS_HOST?.includes('upstash.io') ? {} : undefined,
       },
     }),
+    CommonModule,
     AuthModule,
     EmailModule,
     QueueModule,
@@ -37,6 +40,6 @@ import { HealthModule } from './health/health.module';
     HealthModule,
   ],
   controllers: [AppController],
-  providers: [AppService],
+  providers: [AppService, DemoService],
 })
 export class AppModule {}

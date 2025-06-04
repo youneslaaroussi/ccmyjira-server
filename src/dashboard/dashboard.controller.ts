@@ -24,7 +24,7 @@ import {
   ApiProduces,
   ApiBearerAuth,
 } from '@nestjs/swagger';
-import { JwtAuthGuard } from '../auth/jwt-auth.guard';
+import { DemoJwtAuthGuard } from '../auth/demo-jwt-auth.guard';
 import { JiraConfigService } from '../jira/jira-config.service';
 
 @ApiTags('dashboard')
@@ -40,8 +40,6 @@ export class DashboardController {
    */
   private async getUserContext(req: any, organizationId?: string) {
     const userId = req.user?.id;
-    const isDemo = req.isDemo || req.user?.isDemo || false;
-    
     if (!userId) {
       throw new HttpException('User not authenticated', HttpStatus.UNAUTHORIZED);
     }
@@ -49,20 +47,20 @@ export class DashboardController {
     // Use provided organizationId or get user's default organization
     let orgId = organizationId;
     if (!orgId) {
-      const defaultOrgId = await this.jiraConfigService.getUserDefaultOrganization(userId, isDemo);
+      const defaultOrgId = await this.jiraConfigService.getUserDefaultOrganization(userId);
       if (!defaultOrgId) {
         throw new HttpException('No organization found for user', HttpStatus.BAD_REQUEST);
       }
       orgId = defaultOrgId;
     } else {
       // Validate user has access to the organization
-      const hasAccess = await this.jiraConfigService.validateUserOrganizationAccess(userId, orgId, isDemo);
+      const hasAccess = await this.jiraConfigService.validateUserOrganizationAccess(userId, orgId);
       if (!hasAccess) {
         throw new HttpException('User does not have access to this organization', HttpStatus.FORBIDDEN);
       }
     }
 
-    return { userId, organizationId: orgId, isDemo };
+    return { userId, organizationId: orgId };
   }
 
   /**
@@ -70,11 +68,11 @@ export class DashboardController {
    * GET /api/dashboard?organizationId=abc123
    */
   @Get()
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get complete dashboard data',
-    description: 'Returns comprehensive dashboard data including system statistics, JIRA project information, and real-time metrics. This endpoint provides all the data needed for a complete dashboard view.',
+    description: 'Returns comprehensive dashboard data including system statistics, JIRA project information, and real-time metrics. This endpoint provides all the data needed for a complete dashboard view. In demo mode (/demo/api/dashboard), uses demo JIRA credentials.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -139,8 +137,8 @@ export class DashboardController {
   })
   async getDashboard(@Req() req: any, @Query('organizationId') organizationId?: string): Promise<DashboardData> {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
-      return await this.dashboardService.getDashboardData(userId, orgId, isDemo);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      return await this.dashboardService.getDashboardData(userId, orgId);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch dashboard data: ${error.message}`,
@@ -181,11 +179,11 @@ export class DashboardController {
    * GET /api/dashboard/jira?organizationId=abc123
    */
   @Get('jira')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get JIRA project dashboard',
-    description: 'Returns comprehensive JIRA project information including statistics, team info, and recent activity.',
+    description: 'Returns comprehensive JIRA project information including statistics, team info, and recent activity. In demo mode (/demo/api/dashboard/jira), uses demo JIRA project.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -201,8 +199,8 @@ export class DashboardController {
   })
   async getJiraDashboard(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
-      const dashboardData = await this.dashboardService.getDashboardData(userId, orgId, isDemo);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      const dashboardData = await this.dashboardService.getDashboardData(userId, orgId);
       return dashboardData.jiraData;
     } catch (error) {
       throw new HttpException(
@@ -213,15 +211,15 @@ export class DashboardController {
   }
 
   /**
-   * Get JIRA tickets with optional filtering
-   * GET /api/dashboard/tickets?days=7&status=Open&assignee=john@example.com&search=bug&organizationId=abc123
+   * Get JIRA tickets with filtering options
+   * GET /api/dashboard/tickets?organizationId=abc123&days=30&status=In%20Progress
    */
   @Get('tickets')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get JIRA tickets with filtering',
-    description: 'Retrieve JIRA tickets with optional filtering by date range, status, assignee, and search text.',
+    description: 'Returns JIRA tickets for the project with various filtering options. In demo mode, returns demo project tickets.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -286,9 +284,9 @@ export class DashboardController {
     @Query('search') searchText?: string,
   ) {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
       const daysNum = days ? parseInt(days, 10) : undefined;
-      return await this.dashboardService.getJiraTickets(userId, orgId, isDemo, daysNum, status, assignee, searchText);
+      return await this.dashboardService.getJiraTickets(userId, orgId, daysNum, status, assignee, searchText);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch JIRA tickets: ${error.message}`,
@@ -298,15 +296,15 @@ export class DashboardController {
   }
 
   /**
-   * Get project users with their roles and information
-   * GET /api/dashboard/users?role=developer&activeOnly=true&organizationId=abc123
+   * Get project users and team members
+   * GET /api/dashboard/users?organizationId=abc123&role=Developer
    */
   @Get('users')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get project users',
-    description: 'Retrieve all users who have access to the JIRA project with their roles and information.',
+    description: 'Returns list of users in the JIRA project with optional role filtering. In demo mode, returns demo project team.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -354,8 +352,8 @@ export class DashboardController {
     @Query('activeOnly') activeOnly?: string,
   ) {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
-      const users = await this.dashboardService.getProjectUsers(userId, orgId, isDemo);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      const users = await this.dashboardService.getProjectUsers(userId, orgId);
       
       // Apply filters
       let filteredUsers = users;
@@ -381,14 +379,14 @@ export class DashboardController {
 
   /**
    * Get user workload information
-   * GET /api/dashboard/workloads?userIds=user1,user2,user3&organizationId=abc123
+   * GET /api/dashboard/workloads?organizationId=abc123&userIds=user1,user2
    */
   @Get('workloads')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get user workloads',
-    description: 'Retrieve current workload information for specific users or all project users.',
+    description: 'Returns workload information for specified users or all project users. In demo mode, returns demo workload data.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -429,9 +427,9 @@ export class DashboardController {
     @Query('userIds') userIds?: string
   ) {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
       const userAccountIds = userIds ? userIds.split(',') : undefined;
-      return await this.dashboardService.getUserWorkloads(userId, orgId, isDemo, userAccountIds);
+      return await this.dashboardService.getUserWorkloads(userId, orgId, userAccountIds);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch user workloads: ${error.message}`,
@@ -441,15 +439,15 @@ export class DashboardController {
   }
 
   /**
-   * Get sprint information (if sprints are enabled)
+   * Get sprint information
    * GET /api/dashboard/sprints?organizationId=abc123
    */
   @Get('sprints')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({
     summary: 'Get sprint information',
-    description: 'Retrieve sprint information including active, upcoming, and completed sprints (requires sprint feature to be enabled).',
+    description: 'Returns information about active, upcoming, and completed sprints. In demo mode, returns demo sprint data.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -495,8 +493,8 @@ export class DashboardController {
   })
   async getSprintInfo(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
-      return await this.dashboardService.getSprintInfo(userId, orgId, isDemo);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      return await this.dashboardService.getSprintInfo(userId, orgId);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch sprint info: ${error.message}`,
@@ -506,172 +504,15 @@ export class DashboardController {
   }
 
   /**
-   * Get assignee suggestions for a ticket
-   * GET /api/dashboard/suggest-assignee?type=Bug&technologies=javascript,react&priority=High&organizationId=abc123
-   */
-  @Get('suggest-assignee')
-  @UseGuards(JwtAuthGuard)
-  @ApiBearerAuth()
-  @ApiOperation({
-    summary: 'Get assignee suggestions',
-    description: 'Get AI-powered suggestions for ticket assignment based on ticket type, technologies, priority, and team workload.',
-  })
-  @ApiQuery({
-    name: 'organizationId',
-    required: false,
-    type: 'string',
-    description: 'Organization ID (uses user default if not provided)',
-  })
-  @ApiQuery({
-    name: 'type',
-    required: true,
-    type: 'string',
-    description: 'Ticket type',
-    example: 'Bug',
-    enum: ['Bug', 'Story', 'Task', 'Epic', 'Subtask'],
-  })
-  @ApiQuery({
-    name: 'technologies',
-    required: false,
-    type: 'string',
-    description: 'Comma-separated list of technologies',
-    example: 'javascript,react,node.js',
-  })
-  @ApiQuery({
-    name: 'priority',
-    required: false,
-    type: 'string',
-    description: 'Ticket priority',
-    example: 'High',
-    enum: ['Highest', 'High', 'Medium', 'Low', 'Lowest'],
-  })
-  @ApiQuery({
-    name: 'component',
-    required: false,
-    type: 'string',
-    description: 'Component affected',
-    example: 'authentication',
-  })
-  @ApiOkResponse({
-    description: 'Successfully retrieved assignee suggestions',
-    schema: {
-      type: 'object',
-      properties: {
-        availableUsers: {
-          type: 'array',
-          items: {
-                type: 'object',
-                properties: {
-                  accountId: { type: 'string', example: 'user123' },
-                  displayName: { type: 'string', example: 'John Doe' },
-                  emailAddress: { type: 'string', example: 'john.doe@company.com' },
-              username: { type: 'string', example: 'john.doe' },
-              active: { type: 'boolean', example: true },
-              roles: { type: 'array', items: { type: 'string' }, example: ['Developers'] },
-              workload: {
-                type: 'object',
-                properties: {
-                  totalTickets: { type: 'number', example: 12 },
-                  inProgressTickets: { type: 'number', example: 3 },
-                  todoTickets: { type: 'number', example: 0 },
-                  storyPoints: { type: 'number', example: 21 },
-                  overdue: { type: 'number', example: 1 },
-                },
-              },
-              },
-            },
-          },
-        context: {
-          type: 'object',
-          properties: {
-            ticketType: { type: 'string', example: 'Bug' },
-            technologies: { type: 'array', items: { type: 'string' }, example: ['javascript', 'react'] },
-            priority: { type: 'string', example: 'High' },
-            component: { type: 'string', example: 'authentication' },
-          },
-        },
-        message: { type: 'string', example: 'Retrieved 3 available users for assignment consideration' },
-      },
-    },
-  })
-  @ApiBadRequestResponse({
-    description: 'Ticket type is required',
-  })
-  @ApiInternalServerErrorResponse({
-    description: 'Failed to suggest assignee',
-  })
-  async suggestAssignee(
-    @Req() req: any,
-    @Query('organizationId') organizationId?: string,
-    @Query('type') ticketType?: string,
-    @Query('technologies') technologies?: string,
-    @Query('priority') priority?: string,
-    @Query('component') component?: string,
-  ) {
-    try {
-      if (!ticketType) {
-        throw new HttpException('Ticket type is required', HttpStatus.BAD_REQUEST);
-      }
-
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
-      const techArray = technologies ? technologies.split(',') : [];
-      
-      // Get JIRA config to check if properly configured
-      try {
-        const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, orgId);
-        const assignmentData = await this.dashboardService.jiraService.suggestAssignee(
-          jiraConfig,
-          ticketType,
-          techArray,
-          priority || 'Medium',
-          component,
-        );
-        
-        return {
-          availableUsers: assignmentData.users.map(user => ({
-            accountId: user.accountId,
-            displayName: user.displayName,
-            emailAddress: user.emailAddress,
-            username: user.username,
-            active: user.active,
-            roles: user.roles || [],
-            workload: assignmentData.workloads[user.accountId] || {
-              totalTickets: 0,
-              inProgressTickets: 0,
-              todoTickets: 0,
-              storyPoints: 0,
-              overdue: 0
-            }
-          })),
-          context: assignmentData.context,
-          message: `Retrieved ${assignmentData.users.length} available users for assignment consideration`,
-        };
-      } catch (configError) {
-        return {
-          availableUsers: [],
-          context: { ticketType, technologies: techArray, priority: priority || 'Medium', component },
-          message: 'JIRA not configured - smart assignment unavailable',
-          fallbackRecommendation: 'Complete organization JIRA setup to enable smart ticket assignment',
-          error: configError.message
-        };
-      }
-    } catch (error) {
-      throw new HttpException(
-        `Failed to suggest assignee: ${error.message}`,
-        HttpStatus.INTERNAL_SERVER_ERROR,
-      );
-    }
-  }
-
-  /**
-   * Get system health status
+   * Get health status for the JIRA connection and system
    * GET /api/dashboard/health?organizationId=abc123
    */
   @Get('health')
-  @ApiTags('health')
+  @UseGuards(DemoJwtAuthGuard)
+  @ApiBearerAuth()
   @ApiOperation({
-    summary: 'Get system health',
-    description: 'Check the health status of all system components including queue, JIRA connection, and external dependencies.',
+    summary: 'Get system and JIRA health status',
+    description: 'Returns health status of the system and JIRA connection. In demo mode, tests demo JIRA connection.',
   })
   @ApiQuery({
     name: 'organizationId',
@@ -722,7 +563,6 @@ export class DashboardController {
     try {
       let userId: string | undefined;
       let orgId: string | undefined;
-      let isDemo: boolean = false;
 
       // Health check doesn't require auth, but if user is authenticated and org is provided, we can do more thorough check
       if (req.user?.id && organizationId) {
@@ -730,13 +570,12 @@ export class DashboardController {
           const context = await this.getUserContext(req, organizationId);
           userId = context.userId;
           orgId = context.organizationId;
-          isDemo = context.isDemo;
         } catch (error) {
           // Ignore auth errors for health check
         }
       }
 
-      return await this.dashboardService.getHealthStatus(userId, orgId, isDemo);
+      return await this.dashboardService.getHealthStatus(userId, orgId);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch health status: ${error.message}`,
@@ -750,7 +589,7 @@ export class DashboardController {
    * GET /api/dashboard/project-info?organizationId=abc123
    */
   @Get('project-info')
-  @UseGuards(JwtAuthGuard)
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
   @ApiQuery({
     name: 'organizationId',
@@ -760,8 +599,8 @@ export class DashboardController {
   })
   async getProjectInfo(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
-      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
-      return await this.dashboardService.getProjectMetadata(userId, orgId, isDemo);
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      return await this.dashboardService.getProjectMetadata(userId, orgId);
     } catch (error) {
       if (error.status === HttpStatus.BAD_REQUEST || error.status === HttpStatus.FORBIDDEN) {
         return {
@@ -930,10 +769,16 @@ export class DashboardController {
   }
 
   /**
-   * Clear all caches to force fresh data
-   * POST /api/dashboard/refresh
+   * Get caches and trigger refresh
+   * POST /api/dashboard/refresh-caches
    */
-  @Post('refresh')
+  @Post('refresh-caches')
+  @UseGuards(DemoJwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Refresh all caches',
+    description: 'Clears and refreshes all system caches. In demo mode, refreshes demo data caches.',
+  })
   async refreshCaches() {
     try {
       return await this.dashboardService.refreshCaches();
@@ -946,12 +791,16 @@ export class DashboardController {
   }
 
   /**
-   * Debug endpoint to test user fetching
-   * GET /api/dashboard/debug-users?organizationId=abc123
+   * Debug endpoint to get user information
+   * GET /api/dashboard/debug/users?organizationId=abc123
    */
-  @Get('debug-users')
-  @UseGuards(JwtAuthGuard)
+  @Get('debug/users')
+  @UseGuards(DemoJwtAuthGuard)
   @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Debug: Get user information',
+    description: 'Debug endpoint to get detailed user information for troubleshooting. In demo mode, returns demo user debug info.',
+  })
   async debugUsers(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
       const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
@@ -980,6 +829,203 @@ export class DashboardController {
         success: false,
         error: error.message,
         stack: error.stack,
+      };
+    }
+  }
+
+  /**
+   * Debug endpoint to list all accessible JIRA projects
+   * GET /api/dashboard/debug/projects?organizationId=abc123
+   */
+  @Get('debug/projects')
+  @UseGuards(DemoJwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Debug: List all accessible JIRA projects',
+    description: 'Debug endpoint to list all JIRA projects accessible with the current token. Useful for troubleshooting project key issues.',
+  })
+  async debugProjects(@Req() req: any, @Query('organizationId') organizationId?: string) {
+    try {
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      
+      // Get JIRA config
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, orgId);
+      
+      // Create HTTP client to test API calls
+      const httpClient = this.dashboardService.jiraService['createHttpClient'](jiraConfig);
+      
+      // List all projects accessible to this token
+      const projectsResponse = await httpClient.get('/project');
+      const projects = projectsResponse.data;
+      
+      // Also try to get the specific project that's failing
+      let specificProject: any = null;
+      try {
+        const specificResponse = await httpClient.get(`/project/${jiraConfig.projectKey}`);
+        specificProject = specificResponse.data;
+      } catch (error: any) {
+        specificProject = { error: error.response?.data || error.message };
+      }
+      
+      return {
+        success: true,
+        currentConfig: {
+          baseUrl: jiraConfig.baseUrl,
+          projectKey: jiraConfig.projectKey,
+          cloudId: jiraConfig.cloudId,
+          hasAccessToken: !!jiraConfig.accessToken,
+          userAccountId: jiraConfig.userAccountId,
+          tokenPrefix: jiraConfig.accessToken?.substring(0, 20) + '...',
+        },
+        allProjects: projects.map((project: any) => ({
+          key: project.key,
+          name: project.name,
+          id: project.id,
+          projectTypeKey: project.projectTypeKey,
+          style: project.style,
+        })),
+        specificProject,
+        totalProjectCount: projects.length,
+        message: `Found ${projects.length} accessible projects. Looking for project key: ${jiraConfig.projectKey}`,
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message,
+        response: error.response?.data,
+        status: error.response?.status,
+        stack: error.stack,
+        message: 'Failed to fetch JIRA projects - check token permissions and cloud ID',
+      };
+    }
+  }
+
+  /**
+   * Debug endpoint to test JIRA API connectivity
+   * GET /api/dashboard/debug/jira-test?organizationId=abc123
+   */
+  @Get('debug/jira-test')
+  @UseGuards(DemoJwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Debug: Test JIRA API connectivity',
+    description: 'Debug endpoint to test basic JIRA API connectivity and authentication.',
+  })
+  async debugJiraTest(@Req() req: any, @Query('organizationId') organizationId?: string) {
+    try {
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      
+      // Get JIRA config
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, orgId);
+      
+      // Create HTTP client
+      const httpClient = this.dashboardService.jiraService['createHttpClient'](jiraConfig);
+      
+      const tests: any[] = [];
+      
+      // Test 1: Basic API connectivity
+      try {
+        const serverInfoResponse = await httpClient.get('/serverInfo');
+        tests.push({
+          test: 'Server Info',
+          success: true,
+          data: serverInfoResponse.data,
+        });
+      } catch (error: any) {
+        tests.push({
+          test: 'Server Info',
+          success: false,
+          error: error.response?.data || error.message,
+          status: error.response?.status,
+        });
+      }
+      
+      // Test 2: Current user info
+      try {
+        const myselfResponse = await httpClient.get('/myself');
+        tests.push({
+          test: 'Current User',
+          success: true,
+          data: {
+            accountId: myselfResponse.data.accountId,
+            displayName: myselfResponse.data.displayName,
+            emailAddress: myselfResponse.data.emailAddress,
+            active: myselfResponse.data.active,
+          },
+        });
+      } catch (error: any) {
+        tests.push({
+          test: 'Current User',
+          success: false,
+          error: error.response?.data || error.message,
+          status: error.response?.status,
+        });
+      }
+      
+      // Test 3: List projects
+      try {
+        const projectsResponse = await httpClient.get('/project');
+        tests.push({
+          test: 'List Projects',
+          success: true,
+          data: {
+            projectCount: projectsResponse.data.length,
+            projectKeys: projectsResponse.data.map((p: any) => p.key),
+          },
+        });
+      } catch (error: any) {
+        tests.push({
+          test: 'List Projects',
+          success: false,
+          error: error.response?.data || error.message,
+          status: error.response?.status,
+        });
+      }
+      
+      // Test 4: Specific project access
+      try {
+        const projectResponse = await httpClient.get(`/project/${jiraConfig.projectKey}`);
+        tests.push({
+          test: `Access Project ${jiraConfig.projectKey}`,
+          success: true,
+          data: {
+            key: projectResponse.data.key,
+            name: projectResponse.data.name,
+            id: projectResponse.data.id,
+          },
+        });
+      } catch (error: any) {
+        tests.push({
+          test: `Access Project ${jiraConfig.projectKey}`,
+          success: false,
+          error: error.response?.data || error.message,
+          status: error.response?.status,
+        });
+      }
+      
+      const successCount = tests.filter(t => t.success).length;
+      
+      return {
+        success: successCount > 0,
+        config: {
+          baseUrl: jiraConfig.baseUrl,
+          projectKey: jiraConfig.projectKey,
+          cloudId: jiraConfig.cloudId,
+          apiUrl: `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/api/3`,
+          tokenPrefix: jiraConfig.accessToken?.substring(0, 20) + '...',
+        },
+        tests,
+        summary: `${successCount}/${tests.length} tests passed`,
+        message: successCount === tests.length 
+          ? 'All JIRA API tests passed successfully'
+          : 'Some JIRA API tests failed - check token permissions and configuration',
+      };
+    } catch (error: any) {
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack,
+        message: 'Failed to run JIRA connectivity tests',
       };
     }
   }

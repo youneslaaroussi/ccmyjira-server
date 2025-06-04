@@ -251,10 +251,27 @@ export class JiraService {
     this.logger.log(`   User Account ID: ${jiraConfig.userAccountId}`);
     this.logger.log(`   Cloud ID: ${jiraConfig.cloudId || 'Not available'}`);
 
+    // For API tokens, we need to use Basic authentication with email:token format
+    let authHeader: string;
+    let authLogInfo: string;
+    
+    if (jiraConfig.cloudId) {
+      // Cloud API requires Basic auth with email:token
+      const email = this.configService.get<string>('DEMO_USER_EMAIL') || 'ceo@vidova.ai';
+      const credentials = `${email}:${jiraConfig.accessToken}`;
+      const encodedCredentials = Buffer.from(credentials).toString('base64');
+      authHeader = `Basic ${encodedCredentials}`;
+      authLogInfo = `Basic ${email}:${jiraConfig.accessToken.substring(0, 20)}...`;
+    } else {
+      // Fallback to Bearer for server instances
+      authHeader = `Bearer ${jiraConfig.accessToken}`;
+      authLogInfo = `Bearer ${jiraConfig.accessToken.substring(0, 20)}...`;
+    }
+
     const httpClient = axios.create({
       baseURL: baseUrl,
       headers: {
-        'Authorization': `Bearer ${jiraConfig.accessToken}`,
+        'Authorization': authHeader,
         'Accept': 'application/json',
         'Content-Type': 'application/json',
       },
@@ -271,7 +288,7 @@ export class JiraService {
       await new Promise((resolve) => setTimeout(resolve, delay));
       
       this.logger.log(`📤 JIRA API Request: ${config.method?.toUpperCase()} ${config.url}`);
-      this.logger.log(`   Authorization: Bearer ${jiraConfig.accessToken.substring(0, 20)}...`);
+      this.logger.log(`   Authorization: ${authLogInfo}`);
       
       return config;
     });
@@ -285,7 +302,7 @@ export class JiraService {
       (error) => {
         this.logger.error(`❌ JIRA API Error: ${error.response?.status} ${error.config?.url}`);
         this.logger.error(`   Error message: ${error.response?.data?.errorMessages || error.message}`);
-        this.logger.error(`   Token used: ${jiraConfig.accessToken.substring(0, 20)}...`);
+        this.logger.error(`   Auth used: ${authLogInfo}`);
         return Promise.reject(error);
       }
     );

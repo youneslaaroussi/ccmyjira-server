@@ -3,10 +3,17 @@ import { AppModule } from './app.module';
 import { ValidationPipe } from '@nestjs/common';
 import { DocumentBuilder, SwaggerModule } from '@nestjs/swagger';
 import { getCorsConfig, logCorsConfig, validateCorsConfig } from './config/cors.config';
+import { DemoMiddleware } from './common/middleware/demo.middleware';
+import { ConfigService } from '@nestjs/config';
 import * as bodyParser from 'body-parser';
 
 async function bootstrap() {
   const app = await NestFactory.create(AppModule);
+
+  // Apply demo middleware globally
+  const configService = app.get(ConfigService);
+  const demoMiddleware = new DemoMiddleware(configService);
+  app.use(demoMiddleware.use.bind(demoMiddleware));
 
   // Configure larger payload limits for email attachments
   const payloadLimit = '50mb';
@@ -73,9 +80,17 @@ async function bootstrap() {
       - **Real-time Dashboard**: System metrics, queue monitoring, and JIRA integration
       - **Webhook Integration**: Postmark email processing webhooks
       - **Health Monitoring**: Complete system health checks and monitoring
+      - **Demo Mode**: Access all endpoints via /demo/* routes without authentication
       
       ## Authentication
-      Currently using basic authentication for development. Production deployments should implement proper API key authentication.
+      - **Regular Mode**: JWT-based authentication with Atlassian OAuth
+      - **Demo Mode**: Access any endpoint by prefixing with /demo/ (e.g., /demo/auth/me)
+      
+      ## Demo Mode Usage
+      Try the demo mode by accessing any endpoint with the /demo prefix:
+      - /demo/auth/me - Get demo user profile
+      - /demo/api/dashboard/metrics - View demo JIRA dashboard
+      - /demo/api/dashboard/jira - Access demo JIRA project data
       
       ## Rate Limiting
       - Webhook endpoints: 100 requests/minute per IP
@@ -103,6 +118,7 @@ async function bootstrap() {
     .addTag('webhooks', 'Email webhook endpoints for processing incoming emails')
     .addTag('dashboard', 'Dashboard API for system metrics and JIRA data')
     .addTag('health', 'Health check and monitoring endpoints')
+    .addTag('demo', 'Demo mode endpoints (no authentication required)')
     .addBearerAuth(
       {
         type: 'http',
@@ -147,5 +163,6 @@ async function bootstrap() {
   console.log(`📚 API Documentation: http://localhost:${port}/api/docs`);
   console.log(`🏥 Health Check: http://localhost:${port}/api/dashboard/health`);
   console.log(`⚡ AWS Load Balancer Health Check: http://localhost:${port}/health`);
+  console.log(`🎭 Demo Mode: Access any endpoint with /demo prefix (e.g., http://localhost:${port}/demo/auth/me)`);
 }
 bootstrap();

@@ -1,6 +1,8 @@
-import { Injectable, Logger, BadRequestException } from '@nestjs/common';
-import { ConfigService } from '@nestjs/config';
+import { Injectable, Logger, BadRequestException, Inject } from '@nestjs/common';
+import { REQUEST } from '@nestjs/core';
+import { Request } from 'express';
 import { SupabaseService } from '../auth/supabase.service';
+import { DemoService } from '../common/services/demo.service';
 import { JiraConfiguration } from './jira.service';
 
 @Injectable()
@@ -9,32 +11,33 @@ export class JiraConfigService {
 
   constructor(
     private readonly supabaseService: SupabaseService,
-    private readonly configService: ConfigService,
+    private readonly demoService: DemoService,
+    @Inject(REQUEST) private readonly request: Request,
   ) {}
 
   /**
-   * Get demo JIRA configuration
+   * Resolve JIRA configuration for a user and organization (with demo mode support)
    */
-  private getDemoJiraConfig(): JiraConfiguration {
-    return {
-      baseUrl: this.configService.get('DEMO_JIRA_BASE_URL') || 'https://demo-ccmyjira.atlassian.net',
-      projectKey: this.configService.get('DEMO_JIRA_PROJECT_KEY') || 'DEMO',
-      cloudId: this.configService.get('DEMO_JIRA_CLOUD_ID'),
-      accessToken: this.configService.get('DEMO_JIRA_ACCESS_TOKEN') || 'demo-token',
-      userAccountId: this.configService.get('DEMO_JIRA_USER_ACCOUNT_ID') || 'demo-user-account-id',
-    };
-  }
-
-  /**
-   * Resolve JIRA configuration for a user and organization
-   */
-  async getJiraConfig(userId: string, organizationId: string, isDemo: boolean = false): Promise<JiraConfiguration> {
-    // Return demo configuration if in demo mode
-    if (isDemo) {
-      this.logger.log('🎭 Using demo JIRA configuration');
-      return this.getDemoJiraConfig();
+  async getJiraConfig(userId: string, organizationId: string): Promise<JiraConfiguration> {
+    // Check if this is a demo request
+    if (this.request.isDemo) {
+      this.logger.log('🎭 Demo mode detected - returning demo JIRA configuration');
+      
+      if (!this.demoService.isDemoConfigured()) {
+        throw new BadRequestException('Demo mode is not properly configured');
+      }
+      
+      const demoConfig = this.demoService.getDemoJiraConfig();
+      this.logger.log(`🎯 Demo JIRA config:`);
+      this.logger.log(`   Base URL: ${demoConfig.baseUrl}`);
+      this.logger.log(`   Project Key: ${demoConfig.projectKey}`);
+      this.logger.log(`   Cloud ID: ${demoConfig.cloudId}`);
+      this.logger.log(`   User Account ID: ${demoConfig.userAccountId}`);
+      
+      return demoConfig;
     }
 
+    // Regular user authentication flow
     if (!this.supabaseService.isAvailable()) {
       throw new BadRequestException('Supabase not configured - cannot resolve JIRA configuration');
     }
@@ -133,10 +136,10 @@ export class JiraConfigService {
   /**
    * Get user's default organization (first one they belong to)
    */
-  async getUserDefaultOrganization(userId: string, isDemo: boolean = false): Promise<string | null> {
-    // Return demo organization ID if in demo mode
-    if (isDemo) {
-      return this.configService.get('DEMO_ORGANIZATION_ID') || 'demo-org-12345';
+  async getUserDefaultOrganization(userId: string): Promise<string | null> {
+    // In demo mode, return demo organization ID
+    if (this.request.isDemo) {
+      return this.demoService.getDemoUser().organizationId;
     }
 
     if (!this.supabaseService.isAvailable()) {
@@ -162,10 +165,11 @@ export class JiraConfigService {
   /**
    * Validate if user has access to organization
    */
-  async validateUserOrganizationAccess(userId: string, organizationId: string, isDemo: boolean = false): Promise<boolean> {
-    // Always allow access in demo mode
-    if (isDemo) {
-      return true;
+  async validateUserOrganizationAccess(userId: string, organizationId: string): Promise<boolean> {
+    // In demo mode, always allow access to demo organization
+    if (this.request.isDemo) {
+      const demoOrgId = this.demoService.getDemoUser().organizationId;
+      return organizationId === demoOrgId;
     }
 
     if (!this.supabaseService.isAvailable()) {
