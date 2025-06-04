@@ -18,7 +18,6 @@ export class DemoService {
       cloudId: this.configService.get<string>('DEMO_JIRA_CLOUD_ID'),
       accessToken: this.configService.get<string>('DEMO_JIRA_ACCESS_TOKEN') || '',
       userAccountId: this.configService.get<string>('DEMO_JIRA_USER_ACCOUNT_ID') || '',
-      userEmail: this.configService.get<string>('DEMO_USER_EMAIL') || 'demo@ccmyjira.com',
     };
   }
 

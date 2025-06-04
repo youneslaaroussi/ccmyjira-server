@@ -60,12 +60,12 @@ export class EmailProcessor extends WorkerHost {
               `💡 This domain is not verified - using demo JIRA configuration as fallback`,
             );
           } else {
-            this.logger.log(
+          this.logger.log(
               `🏢 Found verified organization: ${domainLookup.organization.name} (${domainLookup.organizationId})`,
-            );
-            this.logger.log(
-              `👤 Using user: ${domainLookup.user.displayName} (${domainLookup.userId})`,
-            );
+          );
+          this.logger.log(
+            `👤 Using user: ${domainLookup.user.displayName} (${domainLookup.userId})`,
+          );
           }
         } else {
           this.logger.warn(

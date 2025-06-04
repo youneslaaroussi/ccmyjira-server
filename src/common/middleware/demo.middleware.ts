@@ -25,15 +25,21 @@ export class DemoMiddleware implements NestMiddleware {
   constructor(private readonly configService: ConfigService) {}
 
   use(req: Request, res: Response, next: NextFunction) {
+    this.logger.log(`[DemoMiddleware] Incoming request: ${req.method} ${req.originalUrl || req.url}`); // Log originalUrl
+
     // Check if the request path starts with /demo
     if (req.path.startsWith('/demo')) {
-      this.logger.log(`🎭 Demo mode request: ${req.method} ${req.path}`);
+      this.logger.log(`[DemoMiddleware] 🎭 Demo mode path detected: ${req.path}. Activating demo mode.`);
       
       // Strip /demo prefix from the URL
       const originalPath = req.path;
-      const originalUrl = req.url;
+      const originalUrl = req.url; // req.url also contains query params
       const newPath = req.path.replace('/demo', '') || '/';
-      const newUrl = originalUrl.replace('/demo', '') || '/';
+      // Ensure query parameters are preserved when rewriting req.url
+      const urlParts = req.url.split('?');
+      const basePath = urlParts[0].replace('/demo', '') || '/';
+      const queryString = urlParts.length > 1 ? `?${urlParts[1]}` : '';
+      const newUrl = basePath + queryString;
       
       // Update request properties using Object.defineProperty to override read-only properties
       Object.defineProperty(req, 'path', {
@@ -57,8 +63,12 @@ export class DemoMiddleware implements NestMiddleware {
         organizationId: this.configService.get<string>('DEMO_ORGANIZATION_ID') || 'demo-org-123',
       };
 
-      this.logger.log(`🔀 Routing ${req.method} ${originalPath} → ${newPath}`);
-      this.logger.log(`👤 Demo user: ${req.demoUser.displayName} (${req.demoUser.email})`);
+      this.logger.log(`[DemoMiddleware] 🔀 Routing ${req.method} ${originalPath} (original) → ${newPath} (modified)`);
+      this.logger.log(`[DemoMiddleware]    Original URL: ${originalUrl}, Modified URL: ${newUrl}`);
+      this.logger.log(`[DemoMiddleware] 👤 Demo user set: ${req.demoUser.displayName} (${req.demoUser.email}), req.isDemo = ${req.isDemo}`);
+    } else {
+      this.logger.log(`[DemoMiddleware]  jalur non-demo terdeteksi: ${req.path}. req.isDemo diatur ke false.`); // "jalur non-demo terdeteksi" means "non-demo path detected"
+      req.isDemo = false; // Explicitly set to false for non-demo paths
     }
 
     next();

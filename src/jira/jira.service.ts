@@ -9,7 +9,7 @@ export interface JiraConfiguration {
   cloudId?: string;
   accessToken: string;
   userAccountId: string;
-  userEmail: string;
+  isDemo?: boolean; // Added this line
 }
 
 export interface JiraTicket {
@@ -249,33 +249,35 @@ export class JiraService {
     
     this.logger.log(`   Token preview: ${jiraConfig.accessToken.substring(0, 20)}...`);
     this.logger.log(`   Project Key: ${jiraConfig.projectKey}`);
-    this.logger.log(`   User Account ID: ${jiraConfig.userAccountId}`);
-    this.logger.log(`   Cloud ID: ${jiraConfig.cloudId || 'Not available'}`);
+    this.logger.log(`   Is Demo: ${jiraConfig.isDemo}`); // Added for logging
 
-    // For API tokens, we need to use Basic authentication with email:token format
-    let authHeader: string;
-    let authLogInfo: string;
-    
-    if (jiraConfig.cloudId) {
-      // Cloud API requires Basic auth with email:token
-      const email = jiraConfig.userEmail;
-      const credentials = `${email}:${jiraConfig.accessToken}`;
-      const encodedCredentials = Buffer.from(credentials).toString('base64');
-      authHeader = `Basic ${encodedCredentials}`;
-      authLogInfo = `Basic ${email}:${jiraConfig.accessToken.substring(0, 20)}...`;
+    const headers: Record<string, string> = {
+      'Accept': 'application/json',
+      'X-Atlassian-Token': 'no-check', // Required for some operations, like file uploads
+    };
+
+    if (jiraConfig.isDemo) {
+      // Use Basic Auth for demo mode with environment variable credentials
+      const demoUserEmail = this.configService.get<string>('DEMO_USER_EMAIL');
+      const demoApiToken = jiraConfig.accessToken; // Demo token is passed via accessToken in demoConfig
+
+      if (!demoUserEmail || !demoApiToken) {
+        this.logger.error('Demo mode JIRA credentials (email or token) are missing from env or config.');
+        throw new Error('Demo mode JIRA credentials are not properly configured.');
+      }
+      const basicAuthToken = Buffer.from(`${demoUserEmail}:${demoApiToken}`).toString('base64');
+      headers['Authorization'] = `Basic ${basicAuthToken}`;
+      this.logger.log(`   Auth Type: Basic (Demo Mode)`);
+      this.logger.log(`   Basic Auth Email: ${demoUserEmail}`);
     } else {
-      // Fallback to Bearer for server instances
-      authHeader = `Bearer ${jiraConfig.accessToken}`;
-      authLogInfo = `Bearer ${jiraConfig.accessToken.substring(0, 20)}...`;
+      // Use Bearer token (OAuth) for regular authenticated users
+      headers['Authorization'] = `Bearer ${jiraConfig.accessToken}`;
+      this.logger.log(`   Auth Type: Bearer (OAuth)`);
     }
 
     const httpClient = axios.create({
       baseURL: baseUrl,
-      headers: {
-        'Authorization': authHeader,
-        'Accept': 'application/json',
-        'Content-Type': 'application/json',
-      },
+      headers: headers,
       timeout: parseInt(
         this.configService.get<string>('AI_AGENT_TIMEOUT') || '30000',
       ),
@@ -288,8 +290,18 @@ export class JiraService {
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
       
+      // Add Content-Type here if not already set, especially for POST/PUT
+      if (config.method?.toUpperCase() === 'POST' || config.method?.toUpperCase() === 'PUT') {
+        if (!config.headers['Content-Type']) {
+          config.headers['Content-Type'] = 'application/json';
+        }
+      }
       this.logger.log(`📤 JIRA API Request: ${config.method?.toUpperCase()} ${config.url}`);
-      this.logger.log(`   Authorization: ${authLogInfo}`);
+      this.logger.log(`   Authorization: ${config.headers['Authorization']}`);
+      // Log Content-Type if it's a POST or PUT request
+      if (config.method?.toUpperCase() === 'POST' || config.method?.toUpperCase() === 'PUT') {
+        this.logger.log(`   Content-Type: ${config.headers['Content-Type']}`);
+      }
       
       return config;
     });
@@ -303,7 +315,7 @@ export class JiraService {
       (error) => {
         this.logger.error(`❌ JIRA API Error: ${error.response?.status} ${error.config?.url}`);
         this.logger.error(`   Error message: ${error.response?.data?.errorMessages || error.message}`);
-        this.logger.error(`   Auth used: ${authLogInfo}`);
+        this.logger.error(`   Auth used: ${error.config?.headers['Authorization']}`);
         return Promise.reject(error);
       }
     );

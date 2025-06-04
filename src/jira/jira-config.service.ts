@@ -19,9 +19,12 @@ export class JiraConfigService {
    * Resolve JIRA configuration for a user and organization (with demo mode support)
    */
   async getJiraConfig(userId: string, organizationId: string): Promise<JiraConfiguration> {
+    // Log the state of req.isDemo as seen by JiraConfigService
+    this.logger.log(`[JiraConfigService] getJiraConfig called for user: ${userId}, org: ${organizationId}. req.isDemo = ${this.request.isDemo}`);
+
     // Check if this is a demo request
     if (this.request.isDemo) {
-      this.logger.log('🎭 Demo mode detected - returning demo JIRA configuration');
+      this.logger.log('[JiraConfigService] 🎭 Demo mode detected by req.isDemo - returning demo JIRA configuration');
       
       if (!this.demoService.isDemoConfigured()) {
         throw new BadRequestException('Demo mode is not properly configured');
@@ -33,12 +36,17 @@ export class JiraConfigService {
       this.logger.log(`   Project Key: ${demoConfig.projectKey}`);
       this.logger.log(`   Cloud ID: ${demoConfig.cloudId}`);
       this.logger.log(`   User Account ID: ${demoConfig.userAccountId}`);
-      this.logger.log(`   User Email: ${demoConfig.userEmail}`);
       
-      return demoConfig;
+      const resultConfig = {
+        ...demoConfig,
+        isDemo: true, // Explicitly set isDemo for demo configurations
+      };
+      this.logger.log(`[JiraConfigService] Returning Demo JiraConfiguration: isDemo=${resultConfig.isDemo}, token=${resultConfig.accessToken.substring(0,10)}...`);
+      return resultConfig;
     }
 
     // Regular user authentication flow
+    this.logger.log('[JiraConfigService] Non-demo path detected. Proceeding with regular user JIRA configuration.');
     if (!this.supabaseService.isAvailable()) {
       throw new BadRequestException('Supabase not configured - cannot resolve JIRA configuration');
     }
@@ -119,17 +127,18 @@ export class JiraConfigService {
       this.logger.log(`🎯 Final JIRA config for ${user.email}:`);
       this.logger.log(`   Base URL: ${organization.jira_base_url}`);
       this.logger.log(`   Project Key: ${organization.jira_project_key}`);
-      this.logger.log(`   User Email: ${user.email}`);
       this.logger.log(`   Using token: ${user.atlassian_access_token.substring(0, 20)}...`);
 
-      return {
+      const resultConfig = {
         baseUrl: organization.jira_base_url,
         projectKey: organization.jira_project_key,
         cloudId: organization.jira_cloud_id,
         accessToken: user.atlassian_access_token,
         userAccountId: user.atlassian_account_id || user.id,
-        userEmail: user.email,
+        isDemo: false, // Explicitly set isDemo to false for regular configurations
       };
+      this.logger.log(`[JiraConfigService] Returning Regular JiraConfiguration: isDemo=${resultConfig.isDemo}, token=${resultConfig.accessToken.substring(0,10)}...`);
+      return resultConfig;
     } catch (error) {
       this.logger.error('Failed to resolve JIRA configuration:', error);
       throw error;
