@@ -40,6 +40,8 @@ export class DashboardController {
    */
   private async getUserContext(req: any, organizationId?: string) {
     const userId = req.user?.id;
+    const isDemo = req.isDemo || req.user?.isDemo || false;
+    
     if (!userId) {
       throw new HttpException('User not authenticated', HttpStatus.UNAUTHORIZED);
     }
@@ -47,20 +49,20 @@ export class DashboardController {
     // Use provided organizationId or get user's default organization
     let orgId = organizationId;
     if (!orgId) {
-      const defaultOrgId = await this.jiraConfigService.getUserDefaultOrganization(userId);
+      const defaultOrgId = await this.jiraConfigService.getUserDefaultOrganization(userId, isDemo);
       if (!defaultOrgId) {
         throw new HttpException('No organization found for user', HttpStatus.BAD_REQUEST);
       }
       orgId = defaultOrgId;
     } else {
       // Validate user has access to the organization
-      const hasAccess = await this.jiraConfigService.validateUserOrganizationAccess(userId, orgId);
+      const hasAccess = await this.jiraConfigService.validateUserOrganizationAccess(userId, orgId, isDemo);
       if (!hasAccess) {
         throw new HttpException('User does not have access to this organization', HttpStatus.FORBIDDEN);
       }
     }
 
-    return { userId, organizationId: orgId };
+    return { userId, organizationId: orgId, isDemo };
   }
 
   /**
@@ -137,8 +139,8 @@ export class DashboardController {
   })
   async getDashboard(@Req() req: any, @Query('organizationId') organizationId?: string): Promise<DashboardData> {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
-      return await this.dashboardService.getDashboardData(userId, orgId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      return await this.dashboardService.getDashboardData(userId, orgId, isDemo);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch dashboard data: ${error.message}`,
@@ -199,8 +201,8 @@ export class DashboardController {
   })
   async getJiraDashboard(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
-      const dashboardData = await this.dashboardService.getDashboardData(userId, orgId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      const dashboardData = await this.dashboardService.getDashboardData(userId, orgId, isDemo);
       return dashboardData.jiraData;
     } catch (error) {
       throw new HttpException(
@@ -284,9 +286,9 @@ export class DashboardController {
     @Query('search') searchText?: string,
   ) {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
       const daysNum = days ? parseInt(days, 10) : undefined;
-      return await this.dashboardService.getJiraTickets(userId, orgId, daysNum, status, assignee, searchText);
+      return await this.dashboardService.getJiraTickets(userId, orgId, isDemo, daysNum, status, assignee, searchText);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch JIRA tickets: ${error.message}`,
@@ -352,8 +354,8 @@ export class DashboardController {
     @Query('activeOnly') activeOnly?: string,
   ) {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
-      const users = await this.dashboardService.getProjectUsers(userId, orgId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      const users = await this.dashboardService.getProjectUsers(userId, orgId, isDemo);
       
       // Apply filters
       let filteredUsers = users;
@@ -427,9 +429,9 @@ export class DashboardController {
     @Query('userIds') userIds?: string
   ) {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
       const userAccountIds = userIds ? userIds.split(',') : undefined;
-      return await this.dashboardService.getUserWorkloads(userId, orgId, userAccountIds);
+      return await this.dashboardService.getUserWorkloads(userId, orgId, isDemo, userAccountIds);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch user workloads: ${error.message}`,
@@ -493,8 +495,8 @@ export class DashboardController {
   })
   async getSprintInfo(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
-      return await this.dashboardService.getSprintInfo(userId, orgId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      return await this.dashboardService.getSprintInfo(userId, orgId, isDemo);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch sprint info: ${error.message}`,
@@ -720,6 +722,7 @@ export class DashboardController {
     try {
       let userId: string | undefined;
       let orgId: string | undefined;
+      let isDemo: boolean = false;
 
       // Health check doesn't require auth, but if user is authenticated and org is provided, we can do more thorough check
       if (req.user?.id && organizationId) {
@@ -727,12 +730,13 @@ export class DashboardController {
           const context = await this.getUserContext(req, organizationId);
           userId = context.userId;
           orgId = context.organizationId;
+          isDemo = context.isDemo;
         } catch (error) {
           // Ignore auth errors for health check
         }
       }
 
-      return await this.dashboardService.getHealthStatus(userId, orgId);
+      return await this.dashboardService.getHealthStatus(userId, orgId, isDemo);
     } catch (error) {
       throw new HttpException(
         `Failed to fetch health status: ${error.message}`,
@@ -756,8 +760,8 @@ export class DashboardController {
   })
   async getProjectInfo(@Req() req: any, @Query('organizationId') organizationId?: string) {
     try {
-      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
-      return await this.dashboardService.getProjectMetadata(userId, orgId);
+      const { userId, organizationId: orgId, isDemo } = await this.getUserContext(req, organizationId);
+      return await this.dashboardService.getProjectMetadata(userId, orgId, isDemo);
     } catch (error) {
       if (error.status === HttpStatus.BAD_REQUEST || error.status === HttpStatus.FORBIDDEN) {
         return {

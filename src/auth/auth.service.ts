@@ -114,8 +114,13 @@ export class AuthService {
   /**
    * Validate and refresh user session
    */
-  async validateUser(userId: string) {
-    this.logger.log(`🔍 Validating user session: ${userId}`);
+  async validateUser(userId: string, isDemo: boolean = false) {
+    this.logger.log(`🔍 Validating user session: ${userId} (demo: ${isDemo})`);
+
+    // Return demo user profile if in demo mode
+    if (isDemo) {
+      return this.getDemoUserProfile();
+    }
 
     const user = await this.supabaseService.getUserById(userId);
     if (!user) {
@@ -133,6 +138,33 @@ export class AuthService {
         avatarUrl: user.avatar_url,
       },
       organizations,
+    };
+  }
+
+  /**
+   * Get demo user profile
+   */
+  private getDemoUserProfile() {
+    const demoUser = {
+      id: this.configService.get('DEMO_USER_ID') || 'demo-user-12345',
+      email: this.configService.get('DEMO_USER_EMAIL') || 'demo@ccmyjira.com',
+      displayName: this.configService.get('DEMO_USER_NAME') || 'Demo User',
+      avatarUrl: null,
+    };
+
+    const demoOrganization = {
+      id: this.configService.get('DEMO_ORGANIZATION_ID') || 'demo-org-12345',
+      name: 'Demo Organization',
+      jira_base_url: this.configService.get('DEMO_JIRA_BASE_URL') || 'https://demo-ccmyjira.atlassian.net',
+      jira_project_key: this.configService.get('DEMO_JIRA_PROJECT_KEY') || 'DEMO',
+      jira_cloud_id: this.configService.get('DEMO_JIRA_CLOUD_ID'),
+      created_at: new Date().toISOString(),
+      updated_at: new Date().toISOString(),
+    };
+
+    return {
+      user: demoUser,
+      organizations: [demoOrganization],
     };
   }
 
@@ -584,14 +616,16 @@ export class AuthService {
   /**
    * Get user's organizations
    */
-  async getUserOrganizations(userId: string) {
-    try {
-      const organizations = await this.supabaseService.getUserOrganizations(userId);
-      return organizations;
-    } catch (error) {
-      this.logger.error('❌ Failed to get user organizations:', error);
-      throw new BadRequestException('Failed to get organizations');
+  async getUserOrganizations(userId: string, isDemo: boolean = false) {
+    if (isDemo) {
+      return this.getDemoUserProfile().organizations;
     }
+
+    if (!this.supabaseService.isAvailable()) {
+      return [];
+    }
+
+    return await this.supabaseService.getUserOrganizations(userId);
   }
 
   /**

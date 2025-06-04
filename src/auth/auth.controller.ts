@@ -110,11 +110,11 @@ export class AuthController {
    * Get current user profile
    */
   @Get('me')
-  @UseGuards(AuthGuard('jwt'))
+  @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
   @ApiOperation({ 
     summary: 'Get current user',
-    description: 'Returns the current authenticated user profile'
+    description: 'Returns the current authenticated user profile (or demo user if in demo mode)'
   })
   @ApiResponse({ 
     status: 200, 
@@ -131,20 +131,26 @@ export class AuthController {
             avatarUrl: { type: 'string' }
           }
         },
-        organizations: { type: 'array' }
+        organizations: { type: 'array' },
+        isDemo: { type: 'boolean' }
       }
     }
   })
   async getProfile(@Req() req: any) {
     try {
       const userId = req.user.id;
-      const profile = await this.authService.validateUser(userId);
+      const isDemo = req.isDemo || req.user.isDemo || false;
+      
+      const profile = await this.authService.validateUser(userId, isDemo);
       
       if (!profile) {
         throw new HttpException('User not found', HttpStatus.NOT_FOUND);
       }
 
-      return profile;
+      return {
+        ...profile,
+        isDemo,
+      };
     } catch (error) {
       this.logger.error('❌ Failed to get user profile:', error);
       throw new HttpException('Failed to get profile', HttpStatus.INTERNAL_SERVER_ERROR);
@@ -407,11 +413,38 @@ export class AuthController {
   @Get('organizations')
   @UseGuards(JwtAuthGuard)
   @ApiBearerAuth()
-  @ApiOperation({ summary: 'Get user organizations' })
-  @ApiResponse({ status: 200, description: 'User organizations retrieved' })
+  @ApiOperation({ 
+    summary: 'Get user organizations',
+    description: 'Returns all organizations the current user belongs to (or demo organization if in demo mode)'
+  })
+  @ApiResponse({
+    status: 200,
+    description: 'Organizations retrieved successfully',
+    schema: {
+      type: 'object',
+      properties: {
+        success: { type: 'boolean' },
+        organizations: { type: 'array' },
+        isDemo: { type: 'boolean' }
+      }
+    }
+  })
   async getUserOrganizations(@Req() req: any) {
-    const userId = req.user.id;
-    return this.authService.getUserOrganizations(userId);
+    try {
+      const userId = req.user.id;
+      const isDemo = req.isDemo || req.user.isDemo || false;
+      
+      const organizations = await this.authService.getUserOrganizations(userId, isDemo);
+      
+      return {
+        success: true,
+        organizations,
+        isDemo,
+      };
+    } catch (error) {
+      this.logger.error('❌ Failed to get user organizations:', error);
+      throw new HttpException('Failed to get organizations', HttpStatus.INTERNAL_SERVER_ERROR);
+    }
   }
 
   /**

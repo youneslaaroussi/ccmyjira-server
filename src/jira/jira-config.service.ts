@@ -1,4 +1,5 @@
 import { Injectable, Logger, BadRequestException } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
 import { SupabaseService } from '../auth/supabase.service';
 import { JiraConfiguration } from './jira.service';
 
@@ -6,12 +7,34 @@ import { JiraConfiguration } from './jira.service';
 export class JiraConfigService {
   private readonly logger = new Logger(JiraConfigService.name);
 
-  constructor(private readonly supabaseService: SupabaseService) {}
+  constructor(
+    private readonly supabaseService: SupabaseService,
+    private readonly configService: ConfigService,
+  ) {}
+
+  /**
+   * Get demo JIRA configuration
+   */
+  private getDemoJiraConfig(): JiraConfiguration {
+    return {
+      baseUrl: this.configService.get('DEMO_JIRA_BASE_URL') || 'https://demo-ccmyjira.atlassian.net',
+      projectKey: this.configService.get('DEMO_JIRA_PROJECT_KEY') || 'DEMO',
+      cloudId: this.configService.get('DEMO_JIRA_CLOUD_ID'),
+      accessToken: this.configService.get('DEMO_JIRA_ACCESS_TOKEN') || 'demo-token',
+      userAccountId: this.configService.get('DEMO_JIRA_USER_ACCOUNT_ID') || 'demo-user-account-id',
+    };
+  }
 
   /**
    * Resolve JIRA configuration for a user and organization
    */
-  async getJiraConfig(userId: string, organizationId: string): Promise<JiraConfiguration> {
+  async getJiraConfig(userId: string, organizationId: string, isDemo: boolean = false): Promise<JiraConfiguration> {
+    // Return demo configuration if in demo mode
+    if (isDemo) {
+      this.logger.log('🎭 Using demo JIRA configuration');
+      return this.getDemoJiraConfig();
+    }
+
     if (!this.supabaseService.isAvailable()) {
       throw new BadRequestException('Supabase not configured - cannot resolve JIRA configuration');
     }
@@ -110,7 +133,12 @@ export class JiraConfigService {
   /**
    * Get user's default organization (first one they belong to)
    */
-  async getUserDefaultOrganization(userId: string): Promise<string | null> {
+  async getUserDefaultOrganization(userId: string, isDemo: boolean = false): Promise<string | null> {
+    // Return demo organization ID if in demo mode
+    if (isDemo) {
+      return this.configService.get('DEMO_ORGANIZATION_ID') || 'demo-org-12345';
+    }
+
     if (!this.supabaseService.isAvailable()) {
       return null;
     }
@@ -134,7 +162,12 @@ export class JiraConfigService {
   /**
    * Validate if user has access to organization
    */
-  async validateUserOrganizationAccess(userId: string, organizationId: string): Promise<boolean> {
+  async validateUserOrganizationAccess(userId: string, organizationId: string, isDemo: boolean = false): Promise<boolean> {
+    // Always allow access in demo mode
+    if (isDemo) {
+      return true;
+    }
+
     if (!this.supabaseService.isAvailable()) {
       return false;
     }

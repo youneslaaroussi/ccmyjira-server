@@ -54,9 +54,9 @@ export class DashboardService {
   /**
    * Get comprehensive dashboard data including system stats and JIRA information
    */
-  async getDashboardData(userId?: string, organizationId?: string): Promise<DashboardData> {
+  async getDashboardData(userId?: string, organizationId?: string, isDemo: boolean = false): Promise<DashboardData> {
     try {
-      this.logger.log('Fetching comprehensive dashboard data');
+      this.logger.log(`Fetching comprehensive dashboard data (demo: ${isDemo})`);
 
       // Always get system stats
       const systemStats = await this.getSystemStats();
@@ -65,7 +65,7 @@ export class DashboardService {
       let jiraData: ProjectDashboard;
       try {
         if (userId && organizationId) {
-          const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+          const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
           jiraData = await this.jiraService.getProjectDashboard(jiraConfig);
         } else {
           this.logger.log('No user/organization context - returning empty dashboard data for onboarding');
@@ -236,79 +236,74 @@ export class DashboardService {
   }
 
   /**
-   * Get JIRA project users with their current workloads
+   * Get JIRA project users with role filtering
    */
-  async getProjectUsers(userId: string, organizationId: string) {
-    try {
-      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
-      return await this.jiraService.getProjectUsers(jiraConfig);
-    } catch (error) {
-      this.logger.warn('Error fetching project users:', error.message);
-      return [];
-    }
+  async getProjectUsers(userId: string, organizationId: string, isDemo: boolean = false) {
+    const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
+    return await this.jiraService.getProjectUsers(jiraConfig);
   }
 
   /**
-   * Get JIRA tickets with optional filtering
+   * Get JIRA tickets with filtering
    */
   async getJiraTickets(
     userId: string,
     organizationId: string,
+    isDemo: boolean = false,
     days?: number,
     status?: string,
     assignee?: string,
     searchText?: string,
   ) {
-    try {
-      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
-      return await this.jiraService.searchTickets(
-        jiraConfig,
-        days,
-        status,
-        assignee,
-        undefined,
-        searchText,
-      );
-    } catch (error) {
-      this.logger.warn('Error fetching JIRA tickets:', error.message);
-      return [];
-    }
+    const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
+    return await this.jiraService.searchTickets(
+      jiraConfig,
+      days,
+      status,
+      assignee,
+      undefined, // sprintId
+      searchText,
+    );
   }
 
   /**
-   * Get sprint information (if sprints are enabled)
+   * Get sprint information for the project
    */
-  async getSprintInfo(userId: string, organizationId: string) {
+  async getSprintInfo(userId: string, organizationId: string, isDemo: boolean = false) {
     try {
-      if (this.configService.get<string>('ENABLE_SPRINTS') !== 'true') {
-        return { 
-          error: 'Sprint functionality is disabled',
-          activeSprints: [],
-          upcomingSprints: [],
-          completedSprints: []
-        };
-      }
-
-      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
-      const [activeSprints, upcomingSprints, completedSprints] =
-        await Promise.all([
-          this.jiraService.getSprints(jiraConfig, 'active'),
-          this.jiraService.getSprints(jiraConfig, 'future'),
-          this.jiraService.getSprints(jiraConfig, 'closed'),
-        ]);
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
+      
+      // Get all sprint states
+      const [activeSprints, futureSprints, closedSprints] = await Promise.all([
+        this.jiraService.getSprints(jiraConfig, 'active'),
+        this.jiraService.getSprints(jiraConfig, 'future'),
+        this.jiraService.getSprints(jiraConfig, 'closed'),
+      ]);
 
       return {
-        activeSprints,
-        upcomingSprints: upcomingSprints.slice(0, 3),
-        completedSprints: completedSprints.slice(0, 5),
+        success: true,
+        data: {
+          activeSprints,
+          futureSprints,
+          closedSprints: closedSprints.slice(0, 5), // Limit to last 5 closed sprints
+          totalActive: activeSprints.length,
+          totalFuture: futureSprints.length,
+          totalClosed: closedSprints.length,
+        },
       };
     } catch (error) {
-      this.logger.warn('Error fetching sprint info:', error.message);
+      this.logger.error('Error fetching sprint info:', error.message);
       return {
-        activeSprints: [],
-        upcomingSprints: [],
-        completedSprints: [],
-        error: error.message
+        success: false,
+        error: error.message,
+        data: {
+          activeSprints: [],
+          futureSprints: [],
+          closedSprints: [],
+          totalActive: 0,
+          totalFuture: 0,
+          totalClosed: 0,
+        },
       };
     }
   }
@@ -316,33 +311,24 @@ export class DashboardService {
   /**
    * Get user workload information
    */
-  async getUserWorkloads(userId: string, organizationId: string, userAccountIds?: string[]) {
-    try {
-      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
-
-      if (!userAccountIds) {
-        const users = await this.jiraService.getProjectUsers(jiraConfig);
-        userAccountIds = users.map((u) => u.accountId);
-      }
-
-      return await this.jiraService.getUserWorkloads(jiraConfig, userAccountIds);
-    } catch (error) {
-      this.logger.warn('Error fetching user workloads:', error.message);
-      return {};
+  async getUserWorkloads(userId: string, organizationId: string, isDemo: boolean = false, userAccountIds?: string[]) {
+    const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
+    
+    if (!userAccountIds) {
+      // Get all project users if no specific IDs provided
+      const users = await this.jiraService.getProjectUsers(jiraConfig);
+      userAccountIds = users.map(user => user.accountId);
     }
+    
+    return await this.jiraService.getUserWorkloads(jiraConfig, userAccountIds);
   }
 
   /**
    * Get project metadata
    */
-  async getProjectMetadata(userId: string, organizationId: string) {
-    try {
-      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
-      return await this.jiraService.getProjectMetadata(jiraConfig);
-    } catch (error) {
-      this.logger.warn('Error fetching project metadata:', error.message);
-      throw error;
-    }
+  async getProjectMetadata(userId: string, organizationId: string, isDemo: boolean = false) {
+    const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
+    return await this.jiraService.getProjectMetadata(jiraConfig);
   }
 
   /**
@@ -357,11 +343,11 @@ export class DashboardService {
   /**
    * Get system health status
    */
-  async getHealthStatus(userId?: string, organizationId?: string) {
+  async getHealthStatus(userId?: string, organizationId?: string, isDemo: boolean = false) {
     try {
       const [queueHealth, jiraHealth] = await Promise.all([
         this.checkQueueHealth(),
-        this.checkJiraHealth(userId, organizationId),
+        this.checkJiraHealth(userId, organizationId, isDemo),
       ]);
 
       const overall =
@@ -397,13 +383,13 @@ export class DashboardService {
     }
   }
 
-  private async checkJiraHealth(userId?: string, organizationId?: string) {
+  private async checkJiraHealth(userId?: string, organizationId?: string, isDemo: boolean = false) {
     try {
       if (!userId || !organizationId) {
         return { healthy: false, error: 'No user/organization context' };
       }
       
-      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId, isDemo);
       await this.jiraService.getProjectMetadata(jiraConfig);
       return { healthy: true };
     } catch (error) {
