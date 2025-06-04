@@ -84,7 +84,7 @@ async function bootstrap() {
       
       ## CORS Policy
       This API accepts requests from:
-      - **ccmyjira.com** (production domain)
+      - **api.ccmyjira.com** (production domain)
       - **localhost:3000** (development)
       - Additional development origins in development mode
       - Custom origins via CORS_ALLOWED_ORIGINS environment variable
@@ -99,7 +99,7 @@ async function bootstrap() {
     )
     .setLicense('MIT', 'https://opensource.org/licenses/MIT')
     .addServer('http://localhost:3000', 'Development Server')
-    .addServer('https://ccmyjira.com', 'Production Server')
+    .addServer('https://api.ccmyjira.com', 'Production Server')
     .addTag('webhooks', 'Email webhook endpoints for processing incoming emails')
     .addTag('dashboard', 'Dashboard API for system metrics and JIRA data')
     .addTag('health', 'Health check and monitoring endpoints')
