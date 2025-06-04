@@ -10,6 +10,7 @@ import { AiAgentModule } from './ai-agent/ai-agent.module';
 import { DashboardModule } from './dashboard/dashboard.module';
 import { AuthModule } from './auth/auth.module';
 import { DomainModule } from './domain/domain.module';
+import { HealthModule } from './health/health.module';
 
 @Module({
   imports: [
@@ -33,6 +34,7 @@ import { DomainModule } from './domain/domain.module';
     AiAgentModule,
     DashboardModule,
     DomainModule,
+    HealthModule,
   ],
   controllers: [AppController],
   providers: [AppService],

@@ -146,5 +146,6 @@ async function bootstrap() {
   console.log(`🧪 Test endpoint: http://localhost:${port}/webhooks/test`);
   console.log(`📚 API Documentation: http://localhost:${port}/api/docs`);
   console.log(`🏥 Health Check: http://localhost:${port}/api/dashboard/health`);
+  console.log(`⚡ AWS Load Balancer Health Check: http://localhost:${port}/health`);
 }
 bootstrap();
