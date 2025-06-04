@@ -158,6 +158,79 @@ export class JiraService {
   constructor(private readonly configService: ConfigService) {}
 
   /**
+   * Convert JIRA ADF (Atlassian Document Format) to plain text
+   * This removes all formatting and returns clean readable text for the dashboard
+   */
+  private convertAdfToPlainText(adfContent: any): string {
+    if (!adfContent) return '';
+    
+    // Handle simple string content
+    if (typeof adfContent === 'string') {
+      return adfContent;
+    }
+    
+    // Handle ADF document structure
+    if (adfContent.type === 'doc' && adfContent.content) {
+      return this.extractTextFromAdfContent(adfContent.content);
+    }
+    
+    // Handle direct content array
+    if (Array.isArray(adfContent)) {
+      return this.extractTextFromAdfContent(adfContent);
+    }
+    
+    // Handle simple object with text property
+    if (adfContent.text) {
+      return adfContent.text;
+    }
+    
+    // Fallback for any other structure
+    try {
+      return JSON.stringify(adfContent);
+    } catch {
+      return '';
+    }
+  }
+
+  /**
+   * Recursively extract text from ADF content array
+   */
+  private extractTextFromAdfContent(content: any[]): string {
+    if (!Array.isArray(content)) return '';
+    
+    const textParts: string[] = [];
+    
+    for (const item of content) {
+      if (item.type === 'text' && item.text) {
+        textParts.push(item.text);
+      } else if (item.type === 'paragraph' && item.content) {
+        textParts.push(this.extractTextFromAdfContent(item.content));
+      } else if (item.type === 'heading' && item.content) {
+        const headingText = this.extractTextFromAdfContent(item.content);
+        textParts.push(`\n${headingText}\n`);
+      } else if (item.type === 'bulletList' && item.content) {
+        const listItems = this.extractTextFromAdfContent(item.content);
+        textParts.push(`\n${listItems}`);
+      } else if (item.type === 'listItem' && item.content) {
+        const itemText = this.extractTextFromAdfContent(item.content);
+        textParts.push(`• ${itemText}\n`);
+      } else if (item.type === 'codeBlock' && item.content) {
+        const codeText = this.extractTextFromAdfContent(item.content);
+        textParts.push(`\n\`\`\`\n${codeText}\n\`\`\`\n`);
+      } else if (item.type === 'hardBreak') {
+        textParts.push('\n');
+      } else if (item.content) {
+        // Recursively handle any other content types
+        textParts.push(this.extractTextFromAdfContent(item.content));
+      } else if (item.text) {
+        textParts.push(item.text);
+      }
+    }
+    
+    return textParts.join(' ').replace(/\s+/g, ' ').trim();
+  }
+
+  /**
    * Create HTTP client for specific JIRA configuration
    */
   private createHttpClient(jiraConfig: JiraConfiguration): AxiosInstance {
@@ -292,8 +365,7 @@ export class JiraService {
         key: issue.key,
         id: issue.id,
         summary: issue.fields.summary,
-        description:
-          issue.fields.description?.content?.[0]?.content?.[0]?.text || '',
+        description: this.convertAdfToPlainText(issue.fields.description),
         status: issue.fields.status.name,
         issueType: issue.fields.issuetype.name,
         assignee:
