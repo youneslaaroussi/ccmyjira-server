@@ -1340,6 +1340,47 @@ export class JiraService {
   }
 
   /**
+   * Fetch individual attachment content by ID
+   */
+  async fetchAttachmentContent(
+    jiraConfig: JiraConfiguration,
+    attachmentId: string
+  ): Promise<{
+    content: Buffer;
+    filename: string;
+    mimeType: string;
+    size: number;
+  }> {
+    try {
+      const httpClient = this.createHttpClient(jiraConfig);
+      
+      // First get attachment metadata
+      const metadataResponse = await httpClient.get(`/attachment/${attachmentId}`);
+      const metadata = metadataResponse.data;
+      
+      // Then fetch the actual content
+      const contentResponse = await httpClient.get(metadata.content, {
+        responseType: 'arraybuffer',
+        headers: {
+          'Accept': '*/*',
+        },
+      });
+
+      this.logger.log(`Downloaded attachment: ${metadata.filename} (${metadata.size} bytes)`);
+
+      return {
+        content: Buffer.from(contentResponse.data),
+        filename: metadata.filename,
+        mimeType: metadata.mimeType,
+        size: metadata.size,
+      };
+    } catch (error) {
+      this.logger.error(`Error fetching attachment ${attachmentId}:`, error.message);
+      throw new Error(`Failed to fetch attachment: ${error.message}`);
+    }
+  }
+
+  /**
    * Fetch attachments for a specific ticket and return them with base64 content
    */
   async fetchTicketAttachments(

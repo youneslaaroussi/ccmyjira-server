@@ -7,6 +7,8 @@ import {
   HttpStatus,
   Req,
   UseGuards,
+  Param,
+  Res,
 } from '@nestjs/common';
 import {
   DashboardService,
@@ -26,6 +28,7 @@ import {
 } from '@nestjs/swagger';
 import { DemoJwtAuthGuard } from '../auth/demo-jwt-auth.guard';
 import { JiraConfigService } from '../jira/jira-config.service';
+import { JiraService } from '../jira/jira.service';
 
 @ApiTags('dashboard')
 @Controller('api/dashboard')
@@ -33,6 +36,7 @@ export class DashboardController {
   constructor(
     private readonly dashboardService: DashboardService,
     private readonly jiraConfigService: JiraConfigService,
+    private readonly jiraService: JiraService,
   ) {}
 
   /**
@@ -433,6 +437,63 @@ export class DashboardController {
     } catch (error) {
       throw new HttpException(
         `Failed to fetch user workloads: ${error.message}`,
+        HttpStatus.INTERNAL_SERVER_ERROR,
+      );
+    }
+  }
+
+  /**
+   * Download JIRA attachment by ID
+   * GET /api/dashboard/attachments/:attachmentId?organizationId=abc123
+   */
+  @Get('attachments/:attachmentId')
+  @UseGuards(DemoJwtAuthGuard)
+  @ApiBearerAuth()
+  @ApiOperation({
+    summary: 'Download JIRA attachment',
+    description: 'Downloads a specific JIRA attachment by ID. Returns the file with proper content-type headers.',
+  })
+  @ApiQuery({
+    name: 'organizationId',
+    required: false,
+    type: 'string',
+    description: 'Organization ID (uses user default if not provided)',
+  })
+  @ApiOkResponse({
+    description: 'Successfully downloaded attachment',
+    schema: {
+      type: 'string',
+      format: 'binary',
+    },
+  })
+  @ApiInternalServerErrorResponse({
+    description: 'Failed to download attachment',
+  })
+  async downloadAttachment(
+    @Param('attachmentId') attachmentId: string,
+    @Req() req: any,
+    @Res() res: any,
+    @Query('organizationId') organizationId?: string,
+  ) {
+    try {
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      
+      // Get JIRA configuration for the user
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, orgId);
+      
+      // Fetch the attachment content
+      const attachment = await this.jiraService.fetchAttachmentContent(jiraConfig, attachmentId);
+      
+      // Set appropriate headers
+      res.setHeader('Content-Type', attachment.mimeType);
+      res.setHeader('Content-Disposition', `attachment; filename="${attachment.filename}"`);
+      res.setHeader('Content-Length', attachment.size);
+      
+      // Send the file
+      res.send(attachment.content);
+    } catch (error) {
+      throw new HttpException(
+        `Failed to download attachment: ${error.message}`,
         HttpStatus.INTERNAL_SERVER_ERROR,
       );
     }
