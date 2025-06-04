@@ -33,6 +33,7 @@ export class JiraConfigService {
       this.logger.log(`   Project Key: ${demoConfig.projectKey}`);
       this.logger.log(`   Cloud ID: ${demoConfig.cloudId}`);
       this.logger.log(`   User Account ID: ${demoConfig.userAccountId}`);
+      this.logger.log(`   User Email: ${demoConfig.userEmail}`);
       
       return demoConfig;
     }
@@ -118,6 +119,7 @@ export class JiraConfigService {
       this.logger.log(`🎯 Final JIRA config for ${user.email}:`);
       this.logger.log(`   Base URL: ${organization.jira_base_url}`);
       this.logger.log(`   Project Key: ${organization.jira_project_key}`);
+      this.logger.log(`   User Email: ${user.email}`);
       this.logger.log(`   Using token: ${user.atlassian_access_token.substring(0, 20)}...`);
 
       return {
@@ -126,6 +128,7 @@ export class JiraConfigService {
         cloudId: organization.jira_cloud_id,
         accessToken: user.atlassian_access_token,
         userAccountId: user.atlassian_account_id || user.id,
+        userEmail: user.email,
       };
     } catch (error) {
       this.logger.error('Failed to resolve JIRA configuration:', error);

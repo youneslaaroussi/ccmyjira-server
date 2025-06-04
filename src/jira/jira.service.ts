@@ -9,6 +9,7 @@ export interface JiraConfiguration {
   cloudId?: string;
   accessToken: string;
   userAccountId: string;
+  userEmail: string;
 }
 
 export interface JiraTicket {
@@ -257,7 +258,7 @@ export class JiraService {
     
     if (jiraConfig.cloudId) {
       // Cloud API requires Basic auth with email:token
-      const email = this.configService.get<string>('DEMO_USER_EMAIL') || 'ceo@vidova.ai';
+      const email = jiraConfig.userEmail;
       const credentials = `${email}:${jiraConfig.accessToken}`;
       const encodedCredentials = Buffer.from(credentials).toString('base64');
       authHeader = `Basic ${encodedCredentials}`;
