@@ -126,6 +126,7 @@ export class AiAgentService {
       if (input.isDemoMode) {
         try {
           jiraConfig = this.demoService.getDemoJiraConfig();
+          this.logger.log(`🎭 Retrieved demo JIRA configuration in processEmail: ${JSON.stringify(jiraConfig)}`);
           this.logger.log(`🎭 Using demo JIRA configuration for project: ${jiraConfig.projectKey}`);
           trace.decisions.push(`🎭 Demo mode: Using demo JIRA configuration`);
           
@@ -154,6 +155,7 @@ export class AiAgentService {
       } else if (input.userId && input.organizationId) {
         try {
           jiraConfig = await this.jiraConfigService.getJiraConfig(input.userId, input.organizationId);
+          this.logger.log(`✅ Retrieved regular JIRA configuration in processEmail: ${JSON.stringify(jiraConfig)}`);
           this.logger.log(`JIRA configuration resolved for organization: ${input.organizationId}`);
           trace.decisions.push(`✅ JIRA integration available for organization: ${input.organizationId}`);
           
@@ -1034,6 +1036,8 @@ Please analyze this email and take appropriate actions. Pay special attention to
       toolCallResults: [],
     };
 
+    this.logger.log(`🛠️ AiAgentService.executeToolCallsWithResults received jiraConfig: ${JSON.stringify(jiraConfig)}`);
+
     for (const toolCall of toolCalls) {
       const { name, arguments: args } = toolCall.function;
       const parsedArgs = JSON.parse(args);
@@ -1161,9 +1165,16 @@ Please analyze this email and take appropriate actions. Pay special attention to
   }
 
   private async executeSearchTickets(jiraConfig: JiraConfiguration, args: any): Promise<any> {
+    if (!jiraConfig) {
+      return { error: 'JIRA is not configured for this organization.' };
+    }
+    this.logger.log(`🔍 AiAgentService.executeSearchTickets using jiraConfig: ${JSON.stringify(jiraConfig)}`);
+    this.logger.log(`   Tool arguments: ${JSON.stringify(args)}`);
+
+    const daysBack = args.days_to_look_back || 30; // Default to 30 days
     const tickets = await this.jiraService.searchTickets(
       jiraConfig,
-      args.days || 7,
+      daysBack,
       args.status,
       args.assignee,
       args.sprintId,
@@ -1191,6 +1202,12 @@ Please analyze this email and take appropriate actions. Pay special attention to
     args: any,
     emailInput: EmailProcessingInput,
   ): Promise<any> {
+    if (!jiraConfig) {
+      return { error: 'JIRA is not configured for this organization.' };
+    }
+    this.logger.log(`🆕 AiAgentService.executeCreateTicket using jiraConfig: ${JSON.stringify(jiraConfig)}`);
+    this.logger.log(`   Tool arguments: ${JSON.stringify(args)}`);
+
     const sprintsEnabled =
       this.configService.get<string>('ENABLE_SPRINTS') === 'true';
     

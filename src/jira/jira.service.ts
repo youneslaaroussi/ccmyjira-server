@@ -235,7 +235,7 @@ export class JiraService {
    * Create HTTP client for specific JIRA configuration
    */
   private createHttpClient(jiraConfig: JiraConfiguration): AxiosInstance {
-    this.logger.log(`🔗 Creating JIRA HTTP client:`);
+    this.logger.log(`🔗 Creating JIRA HTTP client. Received Config: ${JSON.stringify(jiraConfig)}`);
     
     // Use Atlassian Cloud API format if cloudId is available, otherwise fallback to site URL
     let baseUrl: string;
@@ -249,7 +249,7 @@ export class JiraService {
     
     this.logger.log(`   Token preview: ${jiraConfig.accessToken.substring(0, 20)}...`);
     this.logger.log(`   Project Key: ${jiraConfig.projectKey}`);
-    this.logger.log(`   Is Demo: ${jiraConfig.isDemo}`); // Added for logging
+    this.logger.log(`   Is Demo: ${jiraConfig.isDemo}`);
 
     const headers: Record<string, string> = {
       'Accept': 'application/json',
