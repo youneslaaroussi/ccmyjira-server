@@ -258,6 +258,7 @@ export class DashboardService {
     status?: string,
     assignee?: string,
     searchText?: string,
+    includeAttachmentContent: boolean = false, // Default to false for performance
   ) {
     try {
       const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
@@ -268,6 +269,7 @@ export class DashboardService {
         assignee,
         undefined,
         searchText,
+        includeAttachmentContent,
       );
     } catch (error) {
       this.logger.warn('Error fetching JIRA tickets:', error.message);
@@ -329,6 +331,35 @@ export class DashboardService {
     } catch (error) {
       this.logger.warn('Error fetching user workloads:', error.message);
       return {};
+    }
+  }
+
+  /**
+   * Get a specific JIRA ticket with attachments
+   */
+  async getJiraTicketWithAttachments(
+    userId: string,
+    organizationId: string,
+    ticketKey: string,
+  ) {
+    try {
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      
+      // Search for the specific ticket with attachments
+      const tickets = await this.jiraService.searchTickets(
+        jiraConfig,
+        365, // Search in the last year to find the ticket
+        undefined,
+        undefined,
+        undefined,
+        `key = ${ticketKey}`,
+        true, // Include attachment content
+      );
+      
+      return tickets.length > 0 ? tickets[0] : null;
+    } catch (error) {
+      this.logger.warn(`Error fetching JIRA ticket ${ticketKey}:`, error.message);
+      return null;
     }
   }
 

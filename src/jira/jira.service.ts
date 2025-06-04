@@ -30,6 +30,15 @@ export interface JiraTicket {
   storyPoints?: number;
   dueDate?: string;
   reporter?: string;
+  attachments?: Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+    created: string;
+    author: string;
+    content?: string; // base64 encoded content
+  }>;
 }
 
 export interface JiraSprint {
@@ -353,6 +362,7 @@ export class JiraService {
     assignee?: string,
     sprintId?: number,
     searchText?: string,
+    includeAttachmentContent: boolean = true,
   ): Promise<JiraTicket[]> {
     try {
       const httpClient = this.createHttpClient(jiraConfig);
@@ -386,41 +396,61 @@ export class JiraService {
         params: {
           jql,
           fields:
-            'summary,description,status,issuetype,assignee,priority,created,updated,sprint,labels,components,customfield_10016,duedate,reporter',
+            'summary,description,status,issuetype,assignee,priority,created,updated,sprint,labels,components,customfield_10016,duedate,reporter,attachment',
           maxResults: 100,
         },
       });
 
-      const tickets = response.data.issues.map((issue: any) => ({
-        key: issue.key,
-        id: issue.id,
-        summary: issue.fields.summary,
-        description: this.convertAdfToPlainText(issue.fields.description),
-        status: issue.fields.status.name,
-        issueType: issue.fields.issuetype.name,
-        assignee:
-          issue.fields.assignee?.displayName ||
-          issue.fields.assignee?.emailAddress,
-        assigneeAccountId: issue.fields.assignee?.accountId,
-        priority: issue.fields.priority?.name,
-        created: issue.fields.created,
-        updated: issue.fields.updated,
-        labels: issue.fields.labels || [],
-        components: issue.fields.components?.map((c: any) => c.name) || [],
-        storyPoints: issue.fields.customfield_10016, // Story Points field
-        dueDate: issue.fields.duedate,
-        reporter: issue.fields.reporter?.displayName,
-        sprint: issue.fields.sprint
-          ? {
-              id: issue.fields.sprint.id,
-              name: issue.fields.sprint.name,
-              state: issue.fields.sprint.state?.toLowerCase() || 'unknown',
-              startDate: issue.fields.sprint.startDate,
-              endDate: issue.fields.sprint.endDate,
-              goal: issue.fields.sprint.goal,
-            }
-          : undefined,
-      }));
+      const tickets: JiraTicket[] = [];
+
+      for (const issue of response.data.issues) {
+        // Fetch attachments with content for this ticket
+        const attachments = includeAttachmentContent 
+          ? await this.fetchTicketAttachments(jiraConfig, issue.key, issue.fields.attachment || [])
+          : (issue.fields.attachment || []).map((a: any) => ({
+              id: a.id,
+              filename: a.filename,
+              mimeType: a.mimeType,
+              size: a.size,
+              created: a.created,
+              author: a.author?.displayName || 'Unknown',
+              content: undefined, // Don't include content when not requested
+            }));
+
+        const ticket: JiraTicket = {
+          key: issue.key,
+          id: issue.id,
+          summary: issue.fields.summary,
+          description: this.convertAdfToPlainText(issue.fields.description),
+          status: issue.fields.status.name,
+          issueType: issue.fields.issuetype.name,
+          assignee:
+            issue.fields.assignee?.displayName ||
+            issue.fields.assignee?.emailAddress,
+          assigneeAccountId: issue.fields.assignee?.accountId,
+          priority: issue.fields.priority?.name,
+          created: issue.fields.created,
+          updated: issue.fields.updated,
+          labels: issue.fields.labels || [],
+          components: issue.fields.components?.map((c: any) => c.name) || [],
+          storyPoints: issue.fields.customfield_10016, // Story Points field
+          dueDate: issue.fields.duedate,
+          reporter: issue.fields.reporter?.displayName,
+          sprint: issue.fields.sprint
+            ? {
+                id: issue.fields.sprint.id,
+                name: issue.fields.sprint.name,
+                state: issue.fields.sprint.state?.toLowerCase() || 'unknown',
+                startDate: issue.fields.sprint.startDate,
+                endDate: issue.fields.sprint.endDate,
+                goal: issue.fields.sprint.goal,
+              }
+            : undefined,
+          attachments,
+        };
+
+        tickets.push(ticket);
+      }
 
       this.logger.log(`Found ${tickets.length} JIRA tickets`);
       return tickets;
@@ -965,6 +995,7 @@ export class JiraService {
           components: ticketData.components,
           storyPoints: ticketData.storyPoints,
           dueDate: ticketData.dueDate,
+          attachments: [],
         };
       } catch (createError) {
         // If the creation failed due to field issues, try again with just core fields
@@ -1004,6 +1035,7 @@ export class JiraService {
             updated: new Date().toISOString(),
             labels: [],
             components: [],
+            attachments: [],
           };
         }
         
@@ -1305,6 +1337,88 @@ export class JiraService {
   clearCache(): void {
     this.cache.clear();
     this.logger.log('Cleared JIRA service cache');
+  }
+
+  /**
+   * Fetch attachments for a specific ticket and return them with base64 content
+   */
+  async fetchTicketAttachments(
+    jiraConfig: JiraConfiguration,
+    issueKey: string,
+    attachmentMetadata: any[]
+  ): Promise<Array<{
+    id: string;
+    filename: string;
+    mimeType: string;
+    size: number;
+    created: string;
+    author: string;
+    content?: string;
+  }>> {
+    if (!attachmentMetadata || attachmentMetadata.length === 0) {
+      return [];
+    }
+
+    try {
+      const httpClient = this.createHttpClient(jiraConfig);
+      const attachmentsWithContent: any[] = [];
+
+      for (const attachment of attachmentMetadata) {
+        try {
+          // Download attachment content
+          const contentResponse = await httpClient.get(attachment.content, {
+            responseType: 'arraybuffer',
+            headers: {
+              'Accept': '*/*',
+            },
+          });
+
+          // Convert to base64
+          const base64Content = Buffer.from(contentResponse.data).toString('base64');
+
+          attachmentsWithContent.push({
+            id: attachment.id,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            size: attachment.size,
+            created: attachment.created,
+            author: attachment.author?.displayName || 'Unknown',
+            content: base64Content,
+          });
+
+          this.logger.log(`Downloaded attachment: ${attachment.filename} (${attachment.size} bytes) for ticket ${issueKey}`);
+        } catch (downloadError) {
+          this.logger.warn(`Failed to download attachment ${attachment.filename} for ticket ${issueKey}: ${downloadError.message}`);
+          
+          // Include metadata without content if download fails
+          attachmentsWithContent.push({
+            id: attachment.id,
+            filename: attachment.filename,
+            mimeType: attachment.mimeType,
+            size: attachment.size,
+            created: attachment.created,
+            author: attachment.author?.displayName || 'Unknown',
+            content: undefined, // Content not available
+          });
+        }
+      }
+
+      this.logger.log(`Fetched ${attachmentsWithContent.length} attachments for ticket ${issueKey}`);
+      return attachmentsWithContent;
+    } catch (error) {
+      this.logger.error(`Error fetching attachments for ticket ${issueKey}:`, error.message);
+      
+      // Return metadata without content if there's an error
+      return attachmentMetadata.map(attachment => ({
+        id: attachment.id,
+        filename: attachment.filename,
+        mimeType: attachment.mimeType,
+        size: attachment.size,
+        created: attachment.created,
+        author: attachment.author?.displayName || 'Unknown',
+        content: undefined,
+      }));
+    }
   }
 
   /**
