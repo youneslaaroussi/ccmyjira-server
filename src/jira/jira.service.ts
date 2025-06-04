@@ -733,8 +733,8 @@ export class JiraService {
       const httpClient = this.createHttpClient(jiraConfig);
       this.logger.log(`Creating JIRA ticket: ${ticketData.summary}`);
 
-      // Get issue types and priorities from project metadata
-      const createData = {
+      // Build core required fields
+      const createData: any = {
         fields: {
           project: {
             key: jiraConfig.projectKey,
@@ -758,83 +758,129 @@ export class JiraService {
           issuetype: {
             name: ticketData.issueType,
           },
-          ...(ticketData.priority && {
-            priority: {
-              name: ticketData.priority,
-            },
-          }),
-          ...(ticketData.assignee && {
-            assignee: {
-              emailAddress: ticketData.assignee,
-            },
-          }),
-          ...(ticketData.labels &&
-            ticketData.labels.length > 0 && {
-              labels: ticketData.labels,
-            }),
-          ...(ticketData.components &&
-            ticketData.components.length > 0 && {
-              components: ticketData.components.map((name) => ({ name })),
-            }),
-          ...(ticketData.storyPoints && {
-            customfield_10016: ticketData.storyPoints, // Story Points field
-          }),
-          ...(ticketData.dueDate && {
-            duedate: ticketData.dueDate,
-          }),
         },
       };
 
-      const response = await httpClient.post('/issue', createData);
-
-      const newTicket = response.data;
-      this.logger.log(`Successfully created JIRA ticket: ${newTicket.key}`);
-
-      // Upload attachments after ticket creation
-      if (ticketData.attachments && ticketData.attachments.length > 0) {
-        try {
-          await this.uploadAttachments(jiraConfig, newTicket.key, ticketData.attachments);
-        } catch (attachmentError) {
-          this.logger.warn(
-            `Failed to upload attachments to ticket ${newTicket.key}: ${attachmentError.message}`,
-          );
-          // Don't fail the entire ticket creation if attachments fail
-        }
+      // Add optional fields only if they have values
+      if (ticketData.priority) {
+        createData.fields.priority = { name: ticketData.priority };
       }
 
-      // If sprint is specified and sprints are enabled, add to sprint
-      if (
-        ticketData.sprintId &&
-        this.configService.get<string>('ENABLE_SPRINTS') === 'true'
-      ) {
-        try {
-          await this.addTicketToSprint(jiraConfig, newTicket.key, ticketData.sprintId);
-        } catch (sprintError) {
-          this.logger.warn(
-            `Failed to add ticket to sprint: ${sprintError.message}`,
-          );
-        }
+      if (ticketData.assignee) {
+        createData.fields.assignee = { emailAddress: ticketData.assignee };
       }
 
-      // Clear cache
-      this.cache.delete(`project_dashboard_${jiraConfig.projectKey}`);
+      if (ticketData.dueDate) {
+        createData.fields.duedate = ticketData.dueDate;
+      }
 
-      return {
-        key: newTicket.key,
-        id: newTicket.id,
-        summary: ticketData.summary,
-        description: ticketData.description,
-        status: 'To Do', // Default status
-        issueType: ticketData.issueType,
-        assignee: ticketData.assignee,
-        priority: ticketData.priority,
-        created: new Date().toISOString(),
-        updated: new Date().toISOString(),
-        labels: ticketData.labels,
-        components: ticketData.components,
-        storyPoints: ticketData.storyPoints,
-        dueDate: ticketData.dueDate,
-      };
+      // Try to add optional array fields - these might not be configured
+      if (ticketData.labels && ticketData.labels.length > 0) {
+        createData.fields.labels = ticketData.labels;
+      }
+
+      if (ticketData.components && ticketData.components.length > 0) {
+        createData.fields.components = ticketData.components.map((name) => ({ name }));
+      }
+
+      if (ticketData.storyPoints) {
+        createData.fields.customfield_10016 = ticketData.storyPoints; // Story Points field
+      }
+
+      try {
+        this.logger.log(`📤 Creating ticket with fields: ${Object.keys(createData.fields).join(', ')}`);
+        const response = await httpClient.post('/issue', createData);
+        const newTicket = response.data;
+        this.logger.log(`✅ Successfully created JIRA ticket: ${newTicket.key}`);
+
+        // Upload attachments after ticket creation
+        if (ticketData.attachments && ticketData.attachments.length > 0) {
+          try {
+            await this.uploadAttachments(jiraConfig, newTicket.key, ticketData.attachments);
+          } catch (attachmentError) {
+            this.logger.warn(
+              `Failed to upload attachments to ticket ${newTicket.key}: ${attachmentError.message}`,
+            );
+            // Don't fail the entire ticket creation if attachments fail
+          }
+        }
+
+        // If sprint is specified and sprints are enabled, add to sprint
+        if (
+          ticketData.sprintId &&
+          this.configService.get<string>('ENABLE_SPRINTS') === 'true'
+        ) {
+          try {
+            await this.addTicketToSprint(jiraConfig, newTicket.key, ticketData.sprintId);
+          } catch (sprintError) {
+            this.logger.warn(
+              `Failed to add ticket to sprint: ${sprintError.message}`,
+            );
+          }
+        }
+
+        // Clear cache
+        this.cache.delete(`project_dashboard_${jiraConfig.projectKey}`);
+
+        return {
+          key: newTicket.key,
+          id: newTicket.id,
+          summary: ticketData.summary,
+          description: ticketData.description,
+          status: 'To Do', // Default status
+          issueType: ticketData.issueType,
+          assignee: ticketData.assignee,
+          priority: ticketData.priority,
+          created: new Date().toISOString(),
+          updated: new Date().toISOString(),
+          labels: ticketData.labels,
+          components: ticketData.components,
+          storyPoints: ticketData.storyPoints,
+          dueDate: ticketData.dueDate,
+        };
+      } catch (createError) {
+        // If the creation failed due to field issues, try again with just core fields
+        if (createError.response?.status === 400 && createError.response?.data?.errors) {
+          this.logger.warn(`❌ Ticket creation failed with field errors: ${JSON.stringify(createError.response.data.errors)}`);
+          this.logger.log(`🔄 Retrying with core fields only...`);
+          
+          // Strip out problematic fields and retry with minimal data
+          const coreData = {
+            fields: {
+              project: { key: jiraConfig.projectKey },
+              summary: ticketData.summary,
+              description: createData.fields.description,
+              issuetype: { name: ticketData.issueType },
+              ...(ticketData.priority && { priority: { name: ticketData.priority } }),
+              ...(ticketData.assignee && { assignee: { emailAddress: ticketData.assignee } }),
+            },
+          };
+          
+          const retryResponse = await httpClient.post('/issue', coreData);
+          const newTicket = retryResponse.data;
+          this.logger.log(`✅ Successfully created JIRA ticket (retry): ${newTicket.key}`);
+          
+          // Clear cache
+          this.cache.delete(`project_dashboard_${jiraConfig.projectKey}`);
+          
+          return {
+            key: newTicket.key,
+            id: newTicket.id,
+            summary: ticketData.summary,
+            description: ticketData.description,
+            status: 'To Do',
+            issueType: ticketData.issueType,
+            assignee: ticketData.assignee,
+            priority: ticketData.priority,
+            created: new Date().toISOString(),
+            updated: new Date().toISOString(),
+            labels: [],
+            components: [],
+          };
+        }
+        
+        throw createError;
+      }
     } catch (error) {
       this.logger.error(
         'Error creating JIRA ticket:',
