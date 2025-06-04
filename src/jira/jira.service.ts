@@ -332,7 +332,7 @@ export class JiraService {
   }
 
   /**
-   * Get all users who have access to the project
+   * Get all users who can be assigned to issues in the project
    */
   async getProjectUsers(
     jiraConfig: JiraConfiguration,
@@ -344,68 +344,79 @@ export class JiraService {
     return this.getCachedData(cacheKey, async () => {
       try {
         const httpClient = this.createHttpClient(jiraConfig);
-        this.logger.log(`Fetching project users for ${jiraConfig.projectKey}`);
+        this.logger.log(`Fetching assignable users for project ${jiraConfig.projectKey} (activeOnly: ${activeOnly})`);
 
-        // Get project role members
-        const projectResponse = await httpClient.get(
-          `/project/${jiraConfig.projectKey}/role`,
-        );
-        const roles = projectResponse.data;
+        // Use the assignable users API - much simpler and more reliable
+        const response = await httpClient.get('/user/assignable/search', {
+          params: {
+            project: jiraConfig.projectKey,
+            maxResults: 1000,
+          },
+        });
 
-        const allUsers = new Map<string, JiraUser>();
+        const allUsers = response.data.map((user: any) => ({
+          accountId: user.accountId,
+          username: user.name || user.username,
+          emailAddress: user.emailAddress || '',
+          displayName: user.displayName,
+          active: user.active,
+          avatarUrls: user.avatarUrls,
+          roles: ['Assignable'], // Simple role designation
+        }));
 
-        // Fetch users from each role
-        for (const [roleName, roleUrl] of Object.entries(roles)) {
-          try {
-            const roleResponse = await httpClient.get(roleUrl as string);
-            const actors = roleResponse.data.actors || [];
+        this.logger.log(`📋 Found ${allUsers.length} assignable users from API`);
 
-            for (const actor of actors) {
-              if (
-                actor.type === 'atlassian-user-role-actor' &&
-                actor.actorUser
-              ) {
-                const user = actor.actorUser;
-                if (!activeOnly || user.active) {
-                  allUsers.set(user.accountId, {
-                    accountId: user.accountId,
-                    username: user.name,
-                    emailAddress: user.emailAddress,
-                    displayName: user.displayName,
-                    active: user.active,
-                    avatarUrls: user.avatarUrls,
-                    roles: [
-                      ...(allUsers.get(user.accountId)?.roles || []),
-                      roleName,
-                    ],
-                  });
-                }
-              }
-            }
-          } catch (roleError) {
-            this.logger.warn(
-              `Failed to fetch role ${roleName}:`,
-              roleError.message,
-            );
-          }
-        }
+        // Filter by active status if needed
+        const filteredUsers = activeOnly 
+          ? allUsers.filter((user: any) => user.active)
+          : allUsers;
 
-        const users = Array.from(allUsers.values());
-
-        // Filter by role if specified
-        const filteredUsers = role
-          ? users.filter((user) =>
-              user.roles?.some((r) =>
+        // Filter by role if specified (though this is less relevant now)
+        const finalUsers = role
+          ? filteredUsers.filter((user: any) =>
+              user.roles?.some((r: string) =>
                 r.toLowerCase().includes(role.toLowerCase()),
               ),
             )
-          : users;
+          : filteredUsers;
 
-        this.logger.log(`Found ${filteredUsers.length} project users`);
-        return filteredUsers;
+        this.logger.log(`✅ Final user count: ${finalUsers.length} (activeOnly: ${activeOnly})`);
+        
+        // If still no users, try the general user search as fallback
+        if (finalUsers.length === 0) {
+          this.logger.warn('⚠️ No assignable users found, trying general user search...');
+          try {
+            const searchResponse = await httpClient.get('/user/search', {
+              params: {
+                query: '',
+                maxResults: 50,
+              },
+            });
+            
+            const searchUsers = searchResponse.data
+              .filter((user: any) => !activeOnly || user.active)
+              .map((user: any) => ({
+                accountId: user.accountId,
+                username: user.name || user.username,
+                emailAddress: user.emailAddress || '',
+                displayName: user.displayName,
+                active: user.active,
+                avatarUrls: user.avatarUrls,
+                roles: ['General-Search'],
+              }));
+            
+            this.logger.log(`🔍 Fallback search found ${searchUsers.length} users`);
+            return searchUsers;
+          } catch (searchError) {
+            this.logger.warn('Fallback user search failed:', searchError.message);
+            return [];
+          }
+        }
+
+        return finalUsers;
       } catch (error) {
         this.logger.error(
-          'Error fetching project users:',
+          'Error fetching assignable users:',
           error.response?.data || error.message,
         );
         throw new Error(`Failed to fetch project users: ${error.message}`);

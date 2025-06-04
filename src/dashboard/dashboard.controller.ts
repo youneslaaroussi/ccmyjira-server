@@ -940,5 +940,44 @@ export class DashboardController {
       );
     }
   }
+
+  /**
+   * Debug endpoint to test user fetching
+   * GET /api/dashboard/debug-users?organizationId=abc123
+   */
+  @Get('debug-users')
+  @UseGuards(JwtAuthGuard)
+  @ApiBearerAuth()
+  async debugUsers(@Req() req: any, @Query('organizationId') organizationId?: string) {
+    try {
+      const { userId, organizationId: orgId } = await this.getUserContext(req, organizationId);
+      
+      // Get JIRA config
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, orgId);
+      
+      // Test user fetching directly
+      const users = await this.dashboardService.jiraService.getProjectUsers(jiraConfig, undefined, false); // Get all users including inactive
+      
+      return {
+        success: true,
+        userCount: users.length,
+        users: users.map(user => ({
+          accountId: user.accountId,
+          displayName: user.displayName,
+          emailAddress: user.emailAddress,
+          username: user.username,
+          active: user.active,
+          roles: user.roles,
+        })),
+        message: `Found ${users.length} users`,
+      };
+    } catch (error) {
+      return {
+        success: false,
+        error: error.message,
+        stack: error.stack,
+      };
+    }
+  }
 }
  
