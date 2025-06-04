@@ -1,6 +1,15 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import axios, { AxiosInstance } from 'axios';
+import FormData from 'form-data';
+
+export interface JiraConfiguration {
+  baseUrl: string;
+  projectKey: string;
+  cloudId?: string;
+  accessToken: string;
+  userAccountId: string;
+}
 
 export interface JiraTicket {
   key: string;
@@ -110,6 +119,12 @@ export interface CreateTicketDto {
   labels?: string[];
   components?: string[];
   storyPoints?: number;
+  attachments?: Array<{
+    name: string;
+    content: string; // base64
+    contentType: string;
+    contentId?: string; // for embedded images
+  }>;
 }
 
 export interface UpdateTicketDto {
@@ -123,37 +138,50 @@ export interface UpdateTicketDto {
   labels?: string[];
   components?: string[];
   storyPoints?: number;
+  attachments?: Array<{
+    name: string;
+    content: string; // base64
+    contentType: string;
+    contentId?: string; // for embedded images
+  }>;
 }
 
 @Injectable()
 export class JiraService {
   private readonly logger = new Logger(JiraService.name);
-  private readonly httpClient: AxiosInstance;
-  private readonly baseUrl: string;
-  private readonly projectKey: string;
 
   // Cache for frequently accessed data
   private readonly cache = new Map<string, { data: any; timestamp: number }>();
   private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
 
-  constructor(private readonly configService: ConfigService) {
-    this.baseUrl = this.configService.get<string>('JIRA_BASE_URL') || '';
-    this.projectKey = this.configService.get<string>('JIRA_PROJECT_KEY') || '';
+  constructor(private readonly configService: ConfigService) {}
 
-    if (!this.baseUrl || !this.projectKey) {
-      this.logger.error(
-        'JIRA configuration missing: JIRA_BASE_URL and JIRA_PROJECT_KEY are required',
-      );
+  /**
+   * Create HTTP client for specific JIRA configuration
+   */
+  private createHttpClient(jiraConfig: JiraConfiguration): AxiosInstance {
+    this.logger.log(`🔗 Creating JIRA HTTP client:`);
+    
+    // Use Atlassian Cloud API format if cloudId is available, otherwise fallback to site URL
+    let baseUrl: string;
+    if (jiraConfig.cloudId) {
+      baseUrl = `https://api.atlassian.com/ex/jira/${jiraConfig.cloudId}/rest/api/3`;
+      this.logger.log(`   Using Cloud API: ${baseUrl}`);
+    } else {
+      baseUrl = `${jiraConfig.baseUrl}/rest/api/3`;
+      this.logger.log(`   Using Site API: ${baseUrl}`);
     }
+    
+    this.logger.log(`   Token preview: ${jiraConfig.accessToken.substring(0, 20)}...`);
+    this.logger.log(`   Project Key: ${jiraConfig.projectKey}`);
+    this.logger.log(`   User Account ID: ${jiraConfig.userAccountId}`);
+    this.logger.log(`   Cloud ID: ${jiraConfig.cloudId || 'Not available'}`);
 
-    this.httpClient = axios.create({
-      baseURL: `${this.baseUrl}/rest/api/3`,
-      auth: {
-        username: this.configService.get<string>('JIRA_USERNAME') || '',
-        password: this.configService.get<string>('JIRA_API_TOKEN') || '',
-      },
+    const httpClient = axios.create({
+      baseURL: baseUrl,
       headers: {
-        Accept: 'application/json',
+        'Authorization': `Bearer ${jiraConfig.accessToken}`,
+        'Accept': 'application/json',
         'Content-Type': 'application/json',
       },
       timeout: parseInt(
@@ -161,14 +189,34 @@ export class JiraService {
       ),
     });
 
-    // Add request interceptor for rate limiting
-    this.httpClient.interceptors.request.use(async (config) => {
+    // Add request interceptor for rate limiting and debugging
+    httpClient.interceptors.request.use(async (config) => {
       const delay = parseInt(
         this.configService.get<string>('JIRA_RATE_LIMIT_DELAY') || '1000',
       );
       await new Promise((resolve) => setTimeout(resolve, delay));
+      
+      this.logger.log(`📤 JIRA API Request: ${config.method?.toUpperCase()} ${config.url}`);
+      this.logger.log(`   Authorization: Bearer ${jiraConfig.accessToken.substring(0, 20)}...`);
+      
       return config;
     });
+
+    // Add response interceptor for debugging
+    httpClient.interceptors.response.use(
+      (response) => {
+        this.logger.log(`📥 JIRA API Success: ${response.status} ${response.config.url}`);
+        return response;
+      },
+      (error) => {
+        this.logger.error(`❌ JIRA API Error: ${error.response?.status} ${error.config?.url}`);
+        this.logger.error(`   Error message: ${error.response?.data?.errorMessages || error.message}`);
+        this.logger.error(`   Token used: ${jiraConfig.accessToken.substring(0, 20)}...`);
+        return Promise.reject(error);
+      }
+    );
+
+    return httpClient;
   }
 
   /**
@@ -195,6 +243,7 @@ export class JiraService {
    * Search for JIRA tickets in a given time period
    */
   async searchTickets(
+    jiraConfig: JiraConfiguration,
     daysBack: number = 7,
     status?: string,
     assignee?: string,
@@ -202,11 +251,12 @@ export class JiraService {
     searchText?: string,
   ): Promise<JiraTicket[]> {
     try {
+      const httpClient = this.createHttpClient(jiraConfig);
       const dateFrom = new Date();
       dateFrom.setDate(dateFrom.getDate() - daysBack);
       const dateString = dateFrom.toISOString().split('T')[0];
 
-      let jql = `project = ${this.projectKey} AND created >= "${dateString}"`;
+      let jql = `project = ${jiraConfig.projectKey} AND created >= "${dateString}"`;
 
       if (status) {
         jql += ` AND status = "${status}"`;
@@ -228,7 +278,7 @@ export class JiraService {
 
       this.logger.log(`Searching JIRA tickets with JQL: ${jql}`);
 
-      const response = await this.httpClient.get('/search', {
+      const response = await httpClient.get('/search', {
         params: {
           jql,
           fields:
@@ -284,18 +334,20 @@ export class JiraService {
    * Get all users who have access to the project
    */
   async getProjectUsers(
+    jiraConfig: JiraConfiguration,
     role?: string,
     activeOnly: boolean = true,
   ): Promise<JiraUser[]> {
-    const cacheKey = `project_users_${this.projectKey}_${role}_${activeOnly}`;
+    const cacheKey = `project_users_${jiraConfig.projectKey}_${role}_${activeOnly}`;
 
     return this.getCachedData(cacheKey, async () => {
       try {
-        this.logger.log(`Fetching project users for ${this.projectKey}`);
+        const httpClient = this.createHttpClient(jiraConfig);
+        this.logger.log(`Fetching project users for ${jiraConfig.projectKey}`);
 
         // Get project role members
-        const projectResponse = await this.httpClient.get(
-          `/project/${this.projectKey}/role`,
+        const projectResponse = await httpClient.get(
+          `/project/${jiraConfig.projectKey}/role`,
         );
         const roles = projectResponse.data;
 
@@ -304,7 +356,7 @@ export class JiraService {
         // Fetch users from each role
         for (const [roleName, roleUrl] of Object.entries(roles)) {
           try {
-            const roleResponse = await this.httpClient.get(roleUrl as string);
+            const roleResponse = await httpClient.get(roleUrl as string);
             const actors = roleResponse.data.actors || [];
 
             for (const actor of actors) {
@@ -364,28 +416,30 @@ export class JiraService {
    * Get workload information for specific users
    */
   async getUserWorkloads(
+    jiraConfig: JiraConfiguration,
     userAccountIds: string[],
     includeInProgress: boolean = true,
   ): Promise<{ [accountId: string]: UserWorkload }> {
     try {
+      const httpClient = this.createHttpClient(jiraConfig);
       this.logger.log(`Fetching workloads for ${userAccountIds.length} users`);
 
       const workloads: { [accountId: string]: UserWorkload } = {};
 
       for (const accountId of userAccountIds) {
         // Get user info
-        const userResponse = await this.httpClient.get(
+        const userResponse = await httpClient.get(
           `/user?accountId=${accountId}`,
         );
         const user = userResponse.data;
 
         // Build JQL for user's tickets
-        let jql = `project = ${this.projectKey} AND assignee = "${accountId}"`;
+        let jql = `project = ${jiraConfig.projectKey} AND assignee = "${accountId}"`;
         if (includeInProgress) {
           jql += ' AND status NOT IN ("Done", "Closed", "Resolved")';
         }
 
-        const ticketsResponse = await this.httpClient.get('/search', {
+        const ticketsResponse = await httpClient.get('/search', {
           params: {
             jql,
             fields: 'status,customfield_10016', // status and story points
@@ -450,6 +504,7 @@ export class JiraService {
    * Suggest the best assignee for a ticket based on various factors
    */
   async suggestAssignee(
+    jiraConfig: JiraConfiguration,
     ticketType: string,
     technologies: string[] = [],
     priority: string = 'Medium',
@@ -462,9 +517,9 @@ export class JiraService {
         `Suggesting assignee for ${ticketType} ticket with priority ${priority}`,
       );
 
-      const users = await this.getProjectUsers();
+      const users = await this.getProjectUsers(jiraConfig);
       const userAccountIds = users.map((u) => u.accountId);
-      const workloads = await this.getUserWorkloads(userAccountIds);
+      const workloads = await this.getUserWorkloads(jiraConfig, userAccountIds);
 
       const suggestions = users.map((user) => {
         const workload = workloads[user.accountId];
@@ -580,25 +635,26 @@ export class JiraService {
   /**
    * Get comprehensive project dashboard data
    */
-  async getProjectDashboard(): Promise<ProjectDashboard> {
-    const cacheKey = `project_dashboard_${this.projectKey}`;
+  async getProjectDashboard(jiraConfig: JiraConfiguration): Promise<ProjectDashboard> {
+    const cacheKey = `project_dashboard_${jiraConfig.projectKey}`;
 
     return this.getCachedData(
       cacheKey,
       async () => {
         try {
-          this.logger.log(`Fetching project dashboard for ${this.projectKey}`);
+          const httpClient = this.createHttpClient(jiraConfig);
+          this.logger.log(`Fetching project dashboard for ${jiraConfig.projectKey}`);
 
           // Fetch project metadata
-          const projectResponse = await this.httpClient.get(
-            `/project/${this.projectKey}`,
+          const projectResponse = await httpClient.get(
+            `/project/${jiraConfig.projectKey}`,
           );
           const project = projectResponse.data;
 
           // Fetch all project tickets for statistics
-          const allTicketsResponse = await this.httpClient.get('/search', {
+          const allTicketsResponse = await httpClient.get('/search', {
             params: {
-              jql: `project = ${this.projectKey}`,
+              jql: `project = ${jiraConfig.projectKey}`,
               fields:
                 'status,issuetype,priority,created,updated,resolutiondate,assignee',
               maxResults: 1000,
@@ -651,21 +707,21 @@ export class JiraService {
               : 0;
 
           // Get recent tickets
-          const recentTickets = await this.searchTickets(7);
+          const recentTickets = await this.searchTickets(jiraConfig, 7);
 
           // Get users and workloads
-          const users = await this.getProjectUsers();
+          const users = await this.getProjectUsers(jiraConfig);
           const userAccountIds = users.map((u) => u.accountId);
-          const workloads = await this.getUserWorkloads(userAccountIds);
+          const workloads = await this.getUserWorkloads(jiraConfig, userAccountIds);
 
           // Sprint information (if enabled)
           let sprintInfo;
           if (this.configService.get<string>('ENABLE_SPRINTS') === 'true') {
             const [activeSprints, upcomingSprints, completedSprints] =
               await Promise.all([
-                this.getSprints('active'),
-                this.getSprints('future'),
-                this.getSprints('closed'),
+                this.getSprints(jiraConfig, 'active'),
+                this.getSprints(jiraConfig, 'future'),
+                this.getSprints(jiraConfig, 'closed'),
               ]);
 
             sprintInfo = {
@@ -741,15 +797,16 @@ export class JiraService {
   /**
    * Create a new JIRA ticket
    */
-  async createTicket(ticketData: CreateTicketDto): Promise<JiraTicket> {
+  async createTicket(jiraConfig: JiraConfiguration, ticketData: CreateTicketDto): Promise<JiraTicket> {
     try {
+      const httpClient = this.createHttpClient(jiraConfig);
       this.logger.log(`Creating JIRA ticket: ${ticketData.summary}`);
 
       // Get issue types and priorities from project metadata
       const createData = {
         fields: {
           project: {
-            key: this.projectKey,
+            key: jiraConfig.projectKey,
           },
           summary: ticketData.summary,
           description: {
@@ -797,10 +854,22 @@ export class JiraService {
         },
       };
 
-      const response = await this.httpClient.post('/issue', createData);
+      const response = await httpClient.post('/issue', createData);
 
       const newTicket = response.data;
       this.logger.log(`Successfully created JIRA ticket: ${newTicket.key}`);
+
+      // Upload attachments after ticket creation
+      if (ticketData.attachments && ticketData.attachments.length > 0) {
+        try {
+          await this.uploadAttachments(jiraConfig, newTicket.key, ticketData.attachments);
+        } catch (attachmentError) {
+          this.logger.warn(
+            `Failed to upload attachments to ticket ${newTicket.key}: ${attachmentError.message}`,
+          );
+          // Don't fail the entire ticket creation if attachments fail
+        }
+      }
 
       // If sprint is specified and sprints are enabled, add to sprint
       if (
@@ -808,7 +877,7 @@ export class JiraService {
         this.configService.get<string>('ENABLE_SPRINTS') === 'true'
       ) {
         try {
-          await this.addTicketToSprint(newTicket.key, ticketData.sprintId);
+          await this.addTicketToSprint(jiraConfig, newTicket.key, ticketData.sprintId);
         } catch (sprintError) {
           this.logger.warn(
             `Failed to add ticket to sprint: ${sprintError.message}`,
@@ -817,7 +886,7 @@ export class JiraService {
       }
 
       // Clear cache
-      this.cache.delete(`project_dashboard_${this.projectKey}`);
+      this.cache.delete(`project_dashboard_${jiraConfig.projectKey}`);
 
       return {
         key: newTicket.key,
@@ -848,10 +917,12 @@ export class JiraService {
    * Update an existing JIRA ticket
    */
   async updateTicket(
+    jiraConfig: JiraConfiguration,
     ticketKey: string,
     updateData: UpdateTicketDto,
   ): Promise<void> {
     try {
+      const httpClient = this.createHttpClient(jiraConfig);
       this.logger.log(`Updating JIRA ticket: ${ticketKey}`);
 
       const updateFields: any = {};
@@ -904,19 +975,31 @@ export class JiraService {
 
       // Update fields
       if (Object.keys(updateFields).length > 0) {
-        await this.httpClient.put(`/issue/${ticketKey}`, {
+        await httpClient.put(`/issue/${ticketKey}`, {
           fields: updateFields,
         });
       }
 
       // Handle status transition
       if (updateData.status) {
-        await this.transitionTicket(ticketKey, updateData.status);
+        await this.transitionTicket(jiraConfig, ticketKey, updateData.status);
       }
 
       // Add comment if provided
       if (updateData.comment) {
-        await this.addComment(ticketKey, updateData.comment);
+        await this.addComment(jiraConfig, ticketKey, updateData.comment);
+      }
+
+      // Upload attachments if provided
+      if (updateData.attachments && updateData.attachments.length > 0) {
+        try {
+          await this.uploadAttachments(jiraConfig, ticketKey, updateData.attachments);
+        } catch (attachmentError) {
+          this.logger.warn(
+            `Failed to upload attachments to ticket ${ticketKey}: ${attachmentError.message}`,
+          );
+          // Don't fail the entire update if attachments fail
+        }
       }
 
       // Handle sprint assignment
@@ -924,11 +1007,11 @@ export class JiraService {
         updateData.sprintId &&
         this.configService.get<string>('ENABLE_SPRINTS') === 'true'
       ) {
-        await this.addTicketToSprint(ticketKey, updateData.sprintId);
+        await this.addTicketToSprint(jiraConfig, ticketKey, updateData.sprintId);
       }
 
       // Clear cache
-      this.cache.delete(`project_dashboard_${this.projectKey}`);
+      this.cache.delete(`project_dashboard_${jiraConfig.projectKey}`);
 
       this.logger.log(`Successfully updated JIRA ticket: ${ticketKey}`);
     } catch (error) {
@@ -941,11 +1024,13 @@ export class JiraService {
   }
 
   private async transitionTicket(
+    jiraConfig: JiraConfiguration,
     ticketKey: string,
     newStatus: string,
   ): Promise<void> {
     try {
-      const transitionsResponse = await this.httpClient.get(
+      const httpClient = this.createHttpClient(jiraConfig);
+      const transitionsResponse = await httpClient.get(
         `/issue/${ticketKey}/transitions`,
       );
       const transitions = transitionsResponse.data.transitions;
@@ -958,7 +1043,7 @@ export class JiraService {
         throw new Error(`No transition available to status: ${newStatus}`);
       }
 
-      await this.httpClient.post(`/issue/${ticketKey}/transitions`, {
+      await httpClient.post(`/issue/${ticketKey}/transitions`, {
         transition: {
           id: targetTransition.id,
         },
@@ -974,9 +1059,10 @@ export class JiraService {
     }
   }
 
-  private async addComment(ticketKey: string, comment: string): Promise<void> {
+  private async addComment(jiraConfig: JiraConfiguration, ticketKey: string, comment: string): Promise<void> {
     try {
-      await this.httpClient.post(`/issue/${ticketKey}/comment`, {
+      const httpClient = this.createHttpClient(jiraConfig);
+      await httpClient.post(`/issue/${ticketKey}/comment`, {
         body: {
           type: 'doc',
           version: 1,
@@ -1004,9 +1090,10 @@ export class JiraService {
     }
   }
 
-  async getProjectMetadata(): Promise<any> {
+  async getProjectMetadata(jiraConfig: JiraConfiguration): Promise<any> {
     try {
-      const response = await this.httpClient.get(`/project/${this.projectKey}`);
+      const httpClient = this.createHttpClient(jiraConfig);
+      const response = await httpClient.get(`/project/${jiraConfig.projectKey}`);
       return response.data;
     } catch (error) {
       this.logger.error('Error fetching project metadata:', error.message);
@@ -1015,17 +1102,19 @@ export class JiraService {
   }
 
   async getSprints(
+    jiraConfig: JiraConfiguration,
     state?: 'future' | 'active' | 'closed',
   ): Promise<JiraSprint[]> {
     try {
+      const httpClient = this.createHttpClient(jiraConfig);
       // This assumes you're using Jira Software (not Core) and have access to the agile/board API
       // You might need to adjust this based on your Jira setup
 
       // First, get the board ID for the project
-      const boardsResponse = await this.httpClient.get(
-        `/board?projectKeyOrId=${this.projectKey}`,
+      const boardsResponse = await httpClient.get(
+        `/board?projectKeyOrId=${jiraConfig.projectKey}`,
         {
-          baseURL: `${this.baseUrl}/rest/agile/1.0`,
+          baseURL: `${jiraConfig.baseUrl}/rest/agile/1.0`,
         },
       );
 
@@ -1033,7 +1122,7 @@ export class JiraService {
         !boardsResponse.data.values ||
         boardsResponse.data.values.length === 0
       ) {
-        this.logger.warn(`No boards found for project ${this.projectKey}`);
+        this.logger.warn(`No boards found for project ${jiraConfig.projectKey}`);
         return [];
       }
 
@@ -1044,8 +1133,8 @@ export class JiraService {
         url += `?state=${state}`;
       }
 
-      const sprintsResponse = await this.httpClient.get(url, {
-        baseURL: `${this.baseUrl}/rest/agile/1.0`,
+      const sprintsResponse = await httpClient.get(url, {
+        baseURL: `${jiraConfig.baseUrl}/rest/agile/1.0`,
       });
 
       const sprints = sprintsResponse.data.values.map((sprint: any) => ({
@@ -1058,7 +1147,7 @@ export class JiraService {
       }));
 
       this.logger.log(
-        `Found ${sprints.length} sprints for project ${this.projectKey}`,
+        `Found ${sprints.length} sprints for project ${jiraConfig.projectKey}`,
       );
       return sprints;
     } catch (error) {
@@ -1070,9 +1159,9 @@ export class JiraService {
     }
   }
 
-  async getActiveSprint(): Promise<JiraSprint | null> {
+  async getActiveSprint(jiraConfig: JiraConfiguration): Promise<JiraSprint | null> {
     try {
-      const activeSprints = await this.getSprints('active');
+      const activeSprints = await this.getSprints(jiraConfig, 'active');
       return activeSprints.length > 0 ? activeSprints[0] : null;
     } catch (error) {
       this.logger.error('Error fetching active sprint:', error.message);
@@ -1081,17 +1170,19 @@ export class JiraService {
   }
 
   private async addTicketToSprint(
+    jiraConfig: JiraConfiguration,
     ticketKey: string,
     sprintId: number,
   ): Promise<void> {
     try {
-      await this.httpClient.post(
+      const httpClient = this.createHttpClient(jiraConfig);
+      await httpClient.post(
         `/sprint/${sprintId}/issue`,
         {
           issues: [ticketKey],
         },
         {
-          baseURL: `${this.baseUrl}/rest/agile/1.0`,
+          baseURL: `${jiraConfig.baseUrl}/rest/agile/1.0`,
         },
       );
 
@@ -1111,5 +1202,141 @@ export class JiraService {
   clearCache(): void {
     this.cache.clear();
     this.logger.log('Cleared JIRA service cache');
+  }
+
+  /**
+   * Upload attachments to a Jira ticket
+   */
+  async uploadAttachments(
+    jiraConfig: JiraConfiguration,
+    issueKey: string,
+    attachments: Array<{
+      name: string;
+      content: string; // base64
+      contentType: string;
+      contentId?: string;
+    }>
+  ): Promise<void> {
+    if (!attachments || attachments.length === 0) {
+      return;
+    }
+
+    try {
+      const httpClient = this.createHttpClient(jiraConfig);
+      this.logger.log(`Uploading ${attachments.length} attachments to JIRA ticket: ${issueKey}`);
+
+      for (const attachment of attachments) {
+        await this.uploadSingleAttachment(httpClient, issueKey, attachment);
+      }
+
+      this.logger.log(`Successfully uploaded all attachments to JIRA ticket: ${issueKey}`);
+    } catch (error) {
+      this.logger.error(
+        `Error uploading attachments to JIRA ticket ${issueKey}:`,
+        error.response?.data || error.message,
+      );
+      throw new Error(`Failed to upload attachments: ${error.message}`);
+    }
+  }
+
+  /**
+   * Upload a single attachment to a Jira ticket
+   */
+  private async uploadSingleAttachment(
+    httpClient: AxiosInstance,
+    issueKey: string,
+    attachment: {
+      name: string;
+      content: string; // base64
+      contentType: string;
+      contentId?: string;
+    }
+  ): Promise<void> {
+    try {
+      // Convert base64 to buffer
+      const buffer = Buffer.from(attachment.content, 'base64');
+      
+      // Create form data
+      const formData = new FormData();
+      formData.append('file', buffer, {
+        filename: attachment.name,
+        contentType: attachment.contentType,
+      });
+
+      this.logger.log(`Uploading attachment: ${attachment.name} (${attachment.contentType}) to ${issueKey}`);
+
+      // Upload to Jira
+      const response = await httpClient.post(`/issue/${issueKey}/attachments`, formData, {
+        headers: {
+          'X-Atlassian-Token': 'no-check',
+          ...formData.getHeaders(),
+        },
+        maxContentLength: 10 * 1024 * 1024, // 10MB limit
+        maxBodyLength: 10 * 1024 * 1024, // 10MB limit
+      });
+
+      this.logger.log(`Successfully uploaded attachment: ${attachment.name} to ${issueKey}`);
+      
+      return response.data;
+    } catch (error) {
+      this.logger.error(`Failed to upload attachment ${attachment.name}:`, error.response?.data || error.message);
+      throw error;
+    }
+  }
+
+  /**
+   * Process embedded images from HTML content and convert them to attachments
+   */
+  processEmbeddedImages(
+    htmlContent: string,
+    attachments: Array<{
+      name: string;
+      content: string;
+      contentType: string;
+      contentId?: string;
+    }>
+  ): {
+    processedHtml: string;
+    embeddedImages: Array<{
+      name: string;
+      content: string;
+      contentType: string;
+      contentId?: string;
+    }>;
+  } {
+    if (!htmlContent || !attachments || attachments.length === 0) {
+      return {
+        processedHtml: htmlContent || '',
+        embeddedImages: [],
+      };
+    }
+
+    let processedHtml = htmlContent;
+    const embeddedImages: typeof attachments = [];
+
+    // Find embedded images referenced by Content-ID
+    for (const attachment of attachments) {
+      if (attachment.contentId && attachment.contentType?.startsWith('image/')) {
+        // Look for cid: references in HTML
+        const cidPattern = new RegExp(`cid:${attachment.contentId.replace(/[<>]/g, '')}`, 'gi');
+        
+        if (processedHtml.match(cidPattern)) {
+          embeddedImages.push(attachment);
+          
+          // Replace cid: references with a note about the attached image
+          processedHtml = processedHtml.replace(
+            cidPattern,
+            `[Embedded Image: ${attachment.name}]`
+          );
+          
+          this.logger.log(`Found embedded image: ${attachment.name} (${attachment.contentId})`);
+        }
+      }
+    }
+
+    return {
+      processedHtml,
+      embeddedImages,
+    };
   }
 }

@@ -43,24 +43,49 @@ This system transforms email workflows into intelligent JIRA ticket management b
 
 ## 🚀 Quick Start
 
+### Access Points
+- **🌐 Application**: http://localhost:3000
+- **📚 API Documentation (Swagger)**: http://localhost:3000/api/docs
+- **🏥 Health Check**: http://localhost:3000/api/dashboard/health
+- **📧 Email Webhook**: http://localhost:3000/webhooks/postmark
+- **🧪 Test Endpoint**: http://localhost:3000/webhooks/test
+
+### Prerequisites
+- Node.js 18+
+- Docker & Docker Compose
+- Redis (via Docker or cloud service like Upstash)
+- OpenAI API key
+- JIRA Cloud account with API access
+- Postmark account for email webhooks
+
+### Installation
 ```bash
-# Clone the repository
+# Clone and setup
 git clone <repository-url>
 cd server
-
-# Install dependencies
 pnpm install
 
-# Set up environment variables
+# Configure environment
 cp .env.example .env
-# Edit .env with your configuration
+# Edit .env with your credentials
 
-# Start with Docker Compose (recommended)
+# Start with Docker (recommended)
 docker-compose up -d
 
-# OR start locally
+# Or start locally
 pnpm run start:dev
 ```
+
+## 📚 Documentation
+
+| Guide | Description |
+|-------|-------------|
+| **[🏗️ System Architecture](docs/01-architecture.md)** | Complete system design, components, and data flow |
+| **[⚙️ Installation & Setup](docs/02-installation.md)** | Detailed installation guide for all environments |
+| **[🤖 AI Agent System](docs/04-ai-agent.md)** | AI agent architecture and email processing logic |
+| **[🐳 Docker Deployment](docs/08-docker-deployment.md)** | Production deployment with Docker and orchestration |
+| **[🔌 API Reference](docs/11-api-reference.md)** | Complete REST API documentation |
+| **[📚 API Documentation & Testing](docs/12-api-documentation.md)** | Interactive Swagger UI guide and testing workflows |
 
 ## 🏃‍♂️ Quick Deploy with Docker
 
@@ -147,3 +172,44 @@ This project is licensed under the MIT License - see the [LICENSE](LICENSE) file
 ---
 
 **Next Step**: Start with the [System Architecture](docs/01-architecture.md) to understand how everything works together, or jump to [Installation & Setup](docs/02-installation.md) to get started quickly.
+
+## ✨ Features
+
+### 🎯 Core Features
+- **Email-to-JIRA Integration**: Convert emails into actionable JIRA tickets
+- **AI-Powered Analysis**: GPT-4o analyzes email content and determines optimal actions  
+- **📎 Attachment Processing**: Automatic handling of email attachments and embedded images
+- **Smart Assignment**: AI suggests optimal assignees based on content and team workload
+- **Sprint Management**: Automatic sprint assignment and due date handling
+- **Duplicate Detection**: Prevents duplicate tickets by searching existing issues
+- **Context Preservation**: Maintains email threading and context in JIRA
+
+### 📎 Attachment & Image Support
+
+#### **Supported File Types**
+- **📸 Images**: PNG, JPG, GIF, SVG (screenshots, diagrams, mockups)
+- **📄 Documents**: PDF, DOC, DOCX, TXT (requirements, specs)
+- **📋 Logs**: TXT, LOG files (error logs, console output)
+- **💻 Code**: JS, TS, HTML, CSS, JSON (code snippets)
+- **🗜️ Archives**: ZIP files (multiple file packages)
+- **📊 Data**: HAR, XML, CSV (network traces, data exports)
+
+#### **Processing Capabilities**
+- **🔗 Embedded Images**: Automatically extracts and uploads images referenced with `cid:` in HTML emails
+- **📧 Email Attachments**: Processes all email attachments and uploads to JIRA tickets
+- **🤖 AI Context Analysis**: Uses attachment types to improve ticket categorization
+- **🔒 Security**: File type validation and size limits (10MB per email)
+- **📝 Content Replacement**: Replaces HTML `cid:` references with attachment notes
+
+#### **Example Use Cases**
+```
+📧 Bug Report Email with:
+├── 🖼️ screenshot.png (embedded: cid:bug001)
+├── 📄 error-log.txt  
+└── 📊 network-trace.har
+
+🎯 Result: JIRA Bug ticket with all 3 files attached
+   ├── Screenshot visible in ticket description
+   ├── Error log for debugging
+   └── Network trace for analysis
+```

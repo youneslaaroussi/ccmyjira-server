@@ -1,7 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
-import { JiraService } from '../jira/jira.service';
+import { JiraService, JiraConfiguration } from '../jira/jira.service';
+import { JiraConfigService } from '../jira/jira-config.service';
 
 export interface EmailProcessingInput {
   from: string;
@@ -12,6 +13,8 @@ export interface EmailProcessingInput {
   messageId: string;
   headers: any[];
   attachments: any[];
+  userId?: string;
+  organizationId?: string;
 }
 
 export interface EmailProcessingResult {
@@ -30,6 +33,7 @@ export class AiAgentService {
   constructor(
     private readonly configService: ConfigService,
     private readonly jiraService: JiraService,
+    private readonly jiraConfigService: JiraConfigService,
   ) {
     this.openai = new OpenAI({
       apiKey: this.configService.get<string>('OPENAI_API_KEY'),
@@ -39,13 +43,66 @@ export class AiAgentService {
   async processEmail(
     input: EmailProcessingInput,
   ): Promise<EmailProcessingResult> {
+    const startTime = Date.now();
+    const trace = {
+      startTime,
+      emailAnalysis: {} as any,
+      attachmentProcessing: {} as any,
+      toolCalls: [] as any[],
+      decisions: [] as string[],
+      jiraOperations: [] as any[],
+      finalResult: {} as any,
+    };
+
     try {
       this.logger.log(`Processing email with AI: ${input.subject}`);
 
-      const systemPrompt = this.buildSystemPrompt();
+      // Analyze email for tracing
+      trace.emailAnalysis = {
+        from: input.from,
+        domain: this.extractDomain(input.from),
+        subject: input.subject,
+        type: this.classifyEmailType(input.subject, input.textBody),
+        priority: this.detectPriorityKeywords(input.subject, input.textBody),
+        technologies: this.extractTechnologies(`${input.subject} ${input.textBody}`),
+        mentionedUsers: this.extractMentionedUsers(`${input.subject} ${input.textBody}`),
+        attachmentCount: input.attachments.length,
+      };
+
+      // Process attachments for tracing
+      if (input.attachments.length > 0) {
+        const attachmentData = this.processEmailAttachments(input.attachments, input.htmlBody);
+        trace.attachmentProcessing = {
+          total: input.attachments.length,
+          processed: attachmentData.processedAttachments.length,
+          types: attachmentData.processedAttachments.map(att => ({
+            name: att.name,
+            type: att.contentType,
+            isEmbedded: !!att.contentId,
+          })),
+          embeddedImages: attachmentData.processedAttachments.filter(att => att.contentId).length,
+          regularFiles: attachmentData.processedAttachments.filter(att => !att.contentId).length,
+        };
+      }
+
+      let jiraConfig: JiraConfiguration | null = null;
+      if (input.userId && input.organizationId) {
+        try {
+          jiraConfig = await this.jiraConfigService.getJiraConfig(input.userId, input.organizationId);
+          this.logger.log(`JIRA configuration resolved for organization: ${input.organizationId}`);
+          trace.decisions.push(`✅ JIRA integration available for organization: ${input.organizationId}`);
+        } catch (error) {
+          this.logger.warn(`Could not resolve JIRA configuration: ${error.message}`);
+          trace.decisions.push(`❌ JIRA integration unavailable: ${error.message}`);
+        }
+      } else {
+        this.logger.warn('No user/organization context provided - JIRA operations will be disabled');
+        trace.decisions.push('⚠️ No user/organization context - JIRA operations disabled');
+      }
+
+      const systemPrompt = this.buildSystemPrompt(jiraConfig);
       const userPrompt = this.buildUserPrompt(input);
 
-      // Initialize conversation history
       const messages: any[] = [
         { role: 'system', content: systemPrompt },
         { role: 'user', content: userPrompt },
@@ -58,7 +115,6 @@ export class AiAgentService {
         jiraTicketsModified: [],
       };
 
-      // Allow up to 5 rounds of conversation with the AI
       const maxRounds = this.configService.get<number>('MAX_ROUNDS') || 10;
       let round = 0;
 
@@ -69,7 +125,7 @@ export class AiAgentService {
         const response = await this.openai.chat.completions.create({
           model: this.configService.get<string>('OPENAI_MODEL') || 'gpt-4o',
           messages: messages,
-          tools: this.getToolDefinitions(),
+          tools: this.getToolDefinitions(!!jiraConfig),
           tool_choice: 'auto',
           max_tokens: parseInt(
             this.configService.get<string>('OPENAI_MAX_TOKENS') || '4000',
@@ -78,27 +134,56 @@ export class AiAgentService {
 
         const message = response.choices[0].message;
 
-        // Add AI response to conversation
         messages.push(message);
 
-        // If AI provided a text response, update summary
         if (message.content) {
           result.summary = message.content;
+          trace.decisions.push(`💭 AI Analysis (Round ${round}): ${message.content.substring(0, 100)}...`);
         }
 
-        // If no tool calls, we're done
         if (!message.tool_calls || message.tool_calls.length === 0) {
           this.logger.log(`AI conversation completed after ${round} rounds`);
+          trace.decisions.push(`🏁 AI conversation completed after ${round} rounds`);
           break;
         }
 
-        // Execute tool calls and get results
+        // Log what tools will be executed this round
+        const toolNames = message.tool_calls.map(tc => tc.function.name);
+        this.logger.log(`🔄 Round ${round}: Executing ${message.tool_calls.length} tools: ${toolNames.map(name => this.getToolIcon(name) + ' ' + name).join(', ')}`);
+
+        // Track tool calls for trace
+        const toolCallsInRound = message.tool_calls.map(tc => ({
+          round,
+          name: tc.function.name,
+          arguments: JSON.parse(tc.function.arguments),
+        }));
+        trace.toolCalls.push(...toolCallsInRound);
+
         const toolResults = await this.executeToolCallsWithResults(
           message.tool_calls,
           input,
+          jiraConfig,
         );
 
-        // Merge results
+        // Track JIRA operations
+        for (const toolCall of toolCallsInRound) {
+          if (toolCall.name === 'create_jira_ticket') {
+            trace.jiraOperations.push({
+              type: 'CREATE',
+              summary: toolCall.arguments.summary,
+              issueType: toolCall.arguments.issueType,
+              priority: toolCall.arguments.priority,
+              assignee: toolCall.arguments.assignee,
+            });
+          } else if (toolCall.name === 'modify_jira_ticket') {
+            trace.jiraOperations.push({
+              type: 'UPDATE',
+              ticketKey: toolCall.arguments.ticketKey,
+              changes: Object.keys(toolCall.arguments).filter(k => k !== 'ticketKey'),
+            });
+          }
+        }
+
         result.actions.push(...toolResults.actions);
         result.jiraTicketsCreated?.push(
           ...(toolResults.jiraTicketsCreated || []),
@@ -107,7 +192,6 @@ export class AiAgentService {
           ...(toolResults.jiraTicketsModified || []),
         );
 
-        // Add tool call results back to conversation so AI can see them
         for (let i = 0; i < message.tool_calls.length; i++) {
           const toolCall = message.tool_calls[i];
           const toolResult = toolResults.toolCallResults[i];
@@ -119,7 +203,6 @@ export class AiAgentService {
           });
         }
 
-        // If this round had no meaningful results, break to avoid infinite loops
         if (toolResults.actions.length === 0) {
           break;
         }
@@ -129,11 +212,32 @@ export class AiAgentService {
         this.logger.warn(
           `AI conversation reached maximum rounds (${maxRounds})`,
         );
+        trace.decisions.push(`⚠️ AI conversation reached maximum rounds (${maxRounds})`);
       }
+
+      // Finalize trace
+      trace.finalResult = {
+        endTime: Date.now(),
+        processingTime: Date.now() - startTime,
+        rounds: round,
+        summary: result.summary,
+        ticketsCreated: result.jiraTicketsCreated?.length || 0,
+        ticketsModified: result.jiraTicketsModified?.length || 0,
+        totalActions: result.actions.length,
+      };
+
+      // Log the comprehensive trace
+      this.logActionTrace(trace, result);
 
       return result;
     } catch (error) {
       this.logger.error('Error processing email with AI:', error);
+      trace.finalResult = {
+        endTime: Date.now(),
+        processingTime: Date.now() - startTime,
+        error: error.message,
+      };
+      this.logActionTrace(trace, { summary: 'Error processing email', actions: [], error: error.message });
       return {
         summary: 'Error processing email',
         actions: [],
@@ -142,23 +246,216 @@ export class AiAgentService {
     }
   }
 
-  private buildSystemPrompt(): string {
+  /**
+   * Log a comprehensive, readable trace of all AI agent actions
+   */
+  private logActionTrace(trace: any, result: EmailProcessingResult): void {
+    const duration = trace.finalResult.processingTime;
+    const durationStr = duration > 1000 ? `${(duration/1000).toFixed(1)}s` : `${duration}ms`;
+
+    const lines = [
+      '',
+      '🤖 ═══════════════════════════════════════════════════════════════════════════════',
+      '   🧠 AI AGENT PROCESSING TRACE',
+      '   ═══════════════════════════════════════════════════════════════════════════════',
+      '',
+      `📧 EMAIL ANALYSIS:`,
+      `   From: ${trace.emailAnalysis.from} (${trace.emailAnalysis.domain})`,
+      `   Subject: "${trace.emailAnalysis.subject}"`,
+      `   Type: ${trace.emailAnalysis.type.toUpperCase()} | Priority: ${trace.emailAnalysis.priority.join(', ') || 'None'}`,
+      `   Technologies: ${trace.emailAnalysis.technologies.join(', ') || 'None detected'}`,
+      `   Mentioned Users: ${trace.emailAnalysis.mentionedUsers.join(', ') || 'None detected'}`,
+      '',
+    ];
+
+    // Attachment processing
+    if (trace.attachmentProcessing?.total > 0) {
+      lines.push(
+        `📎 ATTACHMENT PROCESSING:`,
+        `   Total Files: ${trace.attachmentProcessing.total} | Processed: ${trace.attachmentProcessing.processed}`,
+        `   🖼️ Embedded Images: ${trace.attachmentProcessing.embeddedImages}`,
+        `   📄 Regular Files: ${trace.attachmentProcessing.regularFiles}`,
+      );
+      
+      trace.attachmentProcessing.types.forEach((att: any, i: number) => {
+        const icon = att.isEmbedded ? '🖼️' : '📄';
+        lines.push(`   ${icon} ${att.name} (${att.type})`);
+      });
+      lines.push('');
+    }
+
+    // AI Decision Timeline
+    lines.push(`🧠 AI DECISION TIMELINE:`);
+    trace.decisions.forEach((decision: string, i: number) => {
+      lines.push(`   ${i + 1}. ${decision}`);
+    });
+    lines.push('');
+
+    // Tool Calls
+    if (trace.toolCalls.length > 0) {
+      lines.push(`🛠️ TOOL EXECUTION SEQUENCE:`);
+      trace.toolCalls.forEach((tool: any, i: number) => {
+        const icon = this.getToolIcon(tool.name);
+        lines.push(`   ${i + 1}. ${icon} ${tool.name} (Round ${tool.round})`);
+        
+        // Show key arguments
+        if (tool.name === 'create_jira_ticket') {
+          lines.push(`      ➤ Summary: "${tool.arguments.summary}"`);
+          lines.push(`      ➤ Type: ${tool.arguments.issueType} | Priority: ${tool.arguments.priority}`);
+          if (tool.arguments.assignee) lines.push(`      ➤ Assignee: ${tool.arguments.assignee}`);
+        } else if (tool.name === 'modify_jira_ticket') {
+          lines.push(`      ➤ Ticket: ${tool.arguments.ticketKey}`);
+          const changes = Object.keys(tool.arguments).filter(k => k !== 'ticketKey').slice(0, 3);
+          lines.push(`      ➤ Changes: ${changes.join(', ')}`);
+        } else if (tool.name === 'read_jira_tickets') {
+          lines.push(`      ➤ Days back: ${tool.arguments.days || 7}`);
+          if (tool.arguments.searchText) lines.push(`      ➤ Search: "${tool.arguments.searchText}"`);
+        }
+      });
+      lines.push('');
+    }
+
+    // JIRA Operations Summary
+    if (trace.jiraOperations.length > 0) {
+      lines.push(`🎫 JIRA OPERATIONS SUMMARY:`);
+      trace.jiraOperations.forEach((op: any, i: number) => {
+        if (op.type === 'CREATE') {
+          lines.push(`   ${i + 1}. 🆕 Created ${op.issueType}: "${op.summary}"`);
+          if (op.priority) lines.push(`      Priority: ${op.priority}`);
+          if (op.assignee) lines.push(`      Assigned to: ${op.assignee}`);
+        } else if (op.type === 'UPDATE') {
+          lines.push(`   ${i + 1}. ✏️ Updated ${op.ticketKey}`);
+          lines.push(`      Changes: ${op.changes.join(', ')}`);
+        }
+      });
+      lines.push('');
+    }
+
+    // Final Results
+    lines.push(`📊 PROCESSING RESULTS:`);
+    lines.push(`   ⏱️ Duration: ${durationStr} | Rounds: ${trace.finalResult.rounds || 0}`);
+    lines.push(`   🎫 Tickets Created: ${trace.finalResult.ticketsCreated || 0}`);
+    lines.push(`   ✏️ Tickets Modified: ${trace.finalResult.ticketsModified || 0}`);
+    lines.push(`   🔧 Total Actions: ${trace.finalResult.totalActions || 0}`);
+    
+    if (result.error) {
+      lines.push(`   ❌ Error: ${result.error}`);
+    } else {
+      lines.push(`   ✅ Status: Success`);
+    }
+    
+    lines.push('');
+    lines.push(`💬 AI SUMMARY:`);
+    lines.push(`   "${result.summary}"`);
+    lines.push('');
+    lines.push('═══════════════════════════════════════════════════════════════════════════════');
+
+    // Log each line
+    lines.forEach(line => this.logger.log(line));
+  }
+
+  /**
+   * Get appropriate icon for tool type
+   */
+  private getToolIcon(toolName: string): string {
+    const icons: { [key: string]: string } = {
+      'get_current_period': '⏰',
+      'read_jira_tickets': '🔍',
+      'create_jira_ticket': '🆕',
+      'modify_jira_ticket': '✏️',
+      'get_project_users': '👥',
+      'get_user_workload': '📊',
+      'suggest_assignee': '🎯',
+      'get_sprints': '🏃',
+      'get_active_sprint': '🏃‍♂️',
+    };
+    return icons[toolName] || '🔧';
+  }
+
+  private buildSystemPrompt(jiraConfig: JiraConfiguration | null): string {
     const sprintsEnabled =
       this.configService.get<string>('ENABLE_SPRINTS') === 'true';
     const smartAssignment =
       this.configService.get<string>('ENABLE_SMART_ASSIGNMENT') === 'true';
 
+    const jiraAvailable = !!jiraConfig;
+    const projectKey = jiraConfig?.projectKey || 'N/A';
+
     return `You are an AI assistant that processes emails and manages JIRA tickets intelligently${sprintsEnabled ? ' with sprint awareness' : ''}${smartAssignment ? ' and smart user assignment' : ''}.
 
-Your capabilities:
+## 🚨 CRITICAL RULE: NEVER HALLUCINATE OR ASSUME
+- **ONLY use information explicitly stated in the email**
+- **DO NOT infer, assume, or fabricate any details**
+- **DO NOT add timestamps, URLs, or technical details not mentioned**
+- **DO NOT make up error codes, stack traces, or technical specifics**
+- **If information is missing, state "Not specified in email" rather than guessing**
+
+${jiraAvailable ? `Your capabilities:
 - Read JIRA tickets from a specific time period
 - Get current date/time information  
-- Create new JIRA tickets
-- Modify existing JIRA tickets${sprintsEnabled ? '\n- Get sprint information (active, future, closed)\n- Assign tickets to sprints automatically' : ''}${smartAssignment ? '\n- Fetch available team members and their workloads\n- Suggest optimal assignees based on context and expertise\n- Assign tickets to appropriate users automatically' : ''}
+- Create new JIRA tickets WITH ATTACHMENTS and embedded images
+- Modify existing JIRA tickets and ADD ATTACHMENTS
+- Process email attachments (files, images, documents) and upload them to JIRA tickets
+- Handle embedded images in HTML emails and convert them to JIRA attachments${sprintsEnabled ? '\n- Get sprint information (active, future, closed)\n- Assign tickets to sprints automatically' : ''}${smartAssignment ? '\n- Fetch available team members and their workloads\n- Suggest optimal assignees based on context and expertise\n- Assign tickets to appropriate users automatically' : ''}` : 'JIRA capabilities are DISABLED - no organization/user context provided. You can only provide analysis and recommendations.'}
+
+## 📋 PROFESSIONAL JIRA TICKET FORMAT
+
+When creating tickets, use this industry-standard structure:
+
+**Summary**: Clear, actionable title (max 80 characters)
+
+**Description**: Use this professional format:
+\`\`\`
+## Problem Statement
+[Describe the issue based ONLY on email content]
+
+## Impact Assessment  
+- **Reporter**: [Email sender - exactly as provided]
+- **Affected Systems**: [Only what's mentioned in email]
+- **User Impact**: [Only if explicitly stated]
+
+## Details from Email
+[Include relevant email content verbatim]
+
+## Steps to Reproduce
+[Only if provided in email - don't invent steps]
+
+## Expected vs Actual Behavior
+- **Expected**: [Only if mentioned in email]
+- **Actual**: [What the email describes is happening]
+
+## Technical Information
+[Only include technical details explicitly mentioned in email]
+
+## Attachments Referenced
+[List attachments by name - they will be auto-uploaded]
+
+## Email Context
+- **From**: [sender email]
+- **Subject**: [email subject]
+- **Received**: [timestamp]
+\`\`\`
+
+## 🎯 TICKET CLASSIFICATION RULES
+
+**Priority Assignment** (based ONLY on email content):
+- **Highest**: Site down, critical system failure, security breach
+- **High**: Significant functionality broken, multiple users affected
+- **Medium**: Single feature issues, moderate impact
+- **Low**: Minor issues, cosmetic problems, feature requests
+
+**Issue Types**:
+- **Bug**: Something is broken or not working as expected
+- **Task**: Work to be done, configuration, investigation
+- **Story**: New feature or enhancement request
+- **Incident**: Production issues, outages, critical problems
+
+**Component Selection** (only if clearly identifiable):
+- Frontend/UI, Backend/API, Database, Infrastructure, Authentication, etc.
 
 IMPORTANT WORKFLOW - Follow this order:
 
-1. **FIRST ALWAYS SEARCH**: Before creating any new tickets, ALWAYS use read_jira_tickets to search for existing related tickets (search recent tickets from last 14-30 days)
+${jiraAvailable ? `1. **FIRST ALWAYS SEARCH**: Before creating any new tickets, ALWAYS use read_jira_tickets to search for existing related tickets (search recent tickets from last 14-30 days)
 
 ${sprintsEnabled ? '2. **CHECK CURRENT SPRINT**: Use get_active_sprint to understand the current development cycle and sprint dates\n\n3.' : '2.'} **ANALYZE EXISTING TICKETS**: Look for tickets with similar subjects, keywords, or topics. Pay attention to:
    - Similar bug reports
@@ -188,47 +485,126 @@ ${
     : ''
 }
 
-${
-  sprintsEnabled
-    ? `${smartAssignment ? '6.' : '5.'} **SPRINT-AWARE TICKET MANAGEMENT**:
-   - **For NEW tickets**: Automatically assign to active sprint if appropriate
-   - **Set due dates**: Use active sprint end date as default due date for new tickets
-   - **Urgent tickets**: If marked as "Highest" priority, ensure they're in the active sprint
-   - **Future work**: Assign to future sprints if not urgent or if active sprint is full
+${sprintsEnabled ? '6.' : smartAssignment ? '5.' : '4.'} **ATTACHMENT HANDLING**:
+   - **AUTOMATICALLY INCLUDE ATTACHMENTS**: When creating or updating tickets, ALL email attachments will be automatically uploaded to JIRA
+   - **EMBEDDED IMAGES**: HTML email embedded images (cid: references) are processed and uploaded as attachments
+   - **ATTACHMENT CONTEXT**: Consider attachment types when categorizing tickets:
+     * Screenshots/images usually indicate bug reports or UI issues
+     * Log files suggest technical/infrastructure problems  
+     * Documents might be requirements or specifications
+     * Code files indicate development tasks
+   - **SECURITY**: Only process allowed file types (images, documents, logs, code files)
+   - **SIZE LIMITS**: Attachments are limited to 10MB total per email` : ''}
 
-${smartAssignment ? '7.' : '6.'}`
-    : `${smartAssignment ? '5.' : '4.'}`
-} **ALWAYS EXPLAIN YOUR REASONING**: Clearly state:
-   - What existing tickets you found (if any)${sprintsEnabled ? '\n   - What sprint information you discovered' : ''}${smartAssignment ? '\n   - Why you chose specific assignees (workload, expertise, email mentions)\n   - User assignment rationale and alternatives considered' : ''}
-   - Why you chose to update vs create new tickets${sprintsEnabled ? '\n   - Sprint assignment decisions and due date logic' : ''}
+## 🔍 FACTUAL ANALYSIS ONLY
+- Extract information directly from email text
+- Reference attachments by their actual names
+- Use email sender's exact words when quoting issues
+- Don't interpret or expand on technical details
+- If email lacks specific information, acknowledge the gap
 
-Current time: ${new Date().toISOString()}
-JIRA Project: ${this.configService.get<string>('JIRA_PROJECT_KEY')}${sprintsEnabled ? '\nSprint Management: ENABLED' : '\nSprint Management: DISABLED'}${smartAssignment ? '\nSmart Assignment: ENABLED' : '\nSmart Assignment: DISABLED'}
-
-Remember: Search first${sprintsEnabled ? ', check sprints,' : ''}${smartAssignment ? ' get users and workloads,' : ''} then decide whether to update existing tickets or create new${sprintsEnabled ? ' sprint-assigned' : ''}${smartAssignment ? ' properly-assigned' : ''} ones!`;
+Remember: You have access to email attachments and embedded images. Use them to provide better context and automatically attach them to JIRA tickets for complete documentation. Always be factual and never invent details not present in the source email.`;
   }
 
   private buildUserPrompt(input: EmailProcessingInput): string {
-    return `Process this email and determine what JIRA actions are needed:
+    // Process embedded images from HTML
+    const attachmentData = this.processEmailAttachments(input.attachments, input.htmlBody);
+    
+    const priorityKeywords = this.detectPriorityKeywords(input.subject, input.textBody);
+    const technologies = this.extractTechnologies(`${input.subject} ${input.textBody}`);
+    const mentionedUsers = this.extractMentionedUsers(`${input.subject} ${input.textBody}`);
+    const emailType = this.classifyEmailType(input.subject, input.textBody);
 
-From: ${input.from}
-Subject: ${input.subject}
-Received: ${input.receivedAt}
-Message ID: ${input.messageId}
+    return `Email Details:
+- From: ${input.from}
+- Subject: ${input.subject}
+- Body: ${input.textBody}
+${input.htmlBody ? `- HTML Body: ${attachmentData.processedHtml}` : ''}
+- Received At: ${input.receivedAt}
+- Message ID: ${input.messageId}
+${input.attachments.length > 0 ? `- Attachments: ${input.attachments.length} files${attachmentData.attachmentSummary}` : ''}
 
-Email Content:
-${input.textBody || input.htmlBody}
+Email Analysis:
+- Type: ${emailType}
+- Priority Keywords: ${priorityKeywords.join(', ') || 'None'}
+- Technologies Mentioned: ${technologies.join(', ') || 'None'}
+- Users Mentioned: ${mentionedUsers.join(', ') || 'None'}
+- Domain: ${this.extractDomain(input.from)}
 
-${input.attachments.length > 0 ? `Attachments: ${input.attachments.length} files` : ''}
+Please analyze this email and take appropriate actions. Pay special attention to any attachments or embedded images that might be relevant for bug reports, feature requests, or documentation.`;
+  }
 
-Additional Context Analysis:
-- Email sender domain: ${this.extractDomain(input.from)}
-- Priority indicators: ${this.detectPriorityKeywords(input.subject, input.textBody || input.htmlBody)}
-- Technologies mentioned: ${this.extractTechnologies(input.textBody || input.htmlBody)}
-- Potential assignees mentioned: ${this.extractMentionedUsers(input.textBody || input.htmlBody)}
-- Email classification: ${this.classifyEmailType(input.subject, input.textBody || input.htmlBody)}
+  /**
+   * Process email attachments and embedded images
+   */
+  private processEmailAttachments(
+    attachments: any[],
+    htmlBody?: string
+  ): {
+    processedHtml: string;
+    attachmentSummary: string;
+    processedAttachments: Array<{
+      name: string;
+      content: string;
+      contentType: string;
+      contentId?: string;
+    }>;
+  } {
+    if (!attachments || attachments.length === 0) {
+      return {
+        processedHtml: htmlBody || '',
+        attachmentSummary: '',
+        processedAttachments: [],
+      };
+    }
 
-Please analyze this email and take appropriate JIRA actions.`;
+    // Convert Postmark attachments to our format
+    const processedAttachments = attachments.map(att => ({
+      name: att.Name || 'unnamed_file',
+      content: att.Content,
+      contentType: att.ContentType || 'application/octet-stream',
+      contentId: att.ContentID,
+    }));
+
+    let processedHtml = htmlBody || '';
+    const embeddedImages: string[] = [];
+    const regularAttachments: string[] = [];
+
+    // Process each attachment
+    for (const attachment of processedAttachments) {
+      if (attachment.contentId && attachment.contentType?.startsWith('image/')) {
+        // This is an embedded image
+        const cidPattern = new RegExp(`cid:${attachment.contentId.replace(/[<>]/g, '')}`, 'gi');
+        
+        if (processedHtml.match(cidPattern)) {
+          embeddedImages.push(`${attachment.name} (${attachment.contentType})`);
+          
+          // Replace cid: references with a note about the attached image
+          processedHtml = processedHtml.replace(
+            cidPattern,
+            `[Embedded Image: ${attachment.name}]`
+          );
+        }
+      } else {
+        // Regular attachment
+        regularAttachments.push(`${attachment.name} (${attachment.contentType})`);
+      }
+    }
+
+    // Create summary
+    let attachmentSummary = '';
+    if (regularAttachments.length > 0) {
+      attachmentSummary += `\n  Regular Attachments: ${regularAttachments.join(', ')}`;
+    }
+    if (embeddedImages.length > 0) {
+      attachmentSummary += `\n  Embedded Images: ${embeddedImages.join(', ')}`;
+    }
+
+    return {
+      processedHtml,
+      attachmentSummary,
+      processedAttachments,
+    };
   }
 
   private extractDomain(email: string): string {
@@ -271,10 +647,9 @@ Please analyze this email and take appropriate JIRA actions.`;
   }
 
   private extractMentionedUsers(text: string): string[] {
-    // Look for common name patterns and @mentions
     const namePatterns = [
-      /@([a-zA-Z0-9_.-]+)/g, // @username mentions
-      /\b([A-Z][a-z]+ [A-Z][a-z]+)\b/g, // First Last names
+      /@([a-zA-Z0-9_.-]+)/g,
+      /\b([A-Z][a-z]+ [A-Z][a-z]+)\b/g,
       /\b(please assign to|assign this to|can ([a-zA-Z]+) handle|([a-zA-Z]+) should look at)\b/gi
     ];
 
@@ -286,7 +661,7 @@ Please analyze this email and take appropriate JIRA actions.`;
       }
     });
 
-    return [...new Set(mentions)]; // Remove duplicates
+    return [...new Set(mentions)];
   }
 
   private classifyEmailType(subject: string, body: string): string {
@@ -308,7 +683,24 @@ Please analyze this email and take appropriate JIRA actions.`;
     return 'general';
   }
 
-  private getToolDefinitions() {
+  private getToolDefinitions(jiraAvailable: boolean) {
+    if (!jiraAvailable) {
+      return [
+        {
+          type: 'function' as const,
+          function: {
+            name: 'get_current_period',
+            description: 'Get current date and time information',
+            parameters: {
+              type: 'object',
+              properties: {},
+              required: [],
+            },
+          },
+        },
+      ];
+    }
+
     const sprintsEnabled =
       this.configService.get<string>('ENABLE_SPRINTS') === 'true';
     const smartAssignment =
@@ -360,40 +752,39 @@ Please analyze this email and take appropriate JIRA actions.`;
         type: 'function' as const,
         function: {
           name: 'create_jira_ticket',
-          description: 'Create a new JIRA ticket',
+          description: 'Create a new JIRA ticket using professional industry format. Email attachments and embedded images are automatically included. CRITICAL: Only use information explicitly stated in the email - never hallucinate or assume details.',
           parameters: {
             type: 'object',
             properties: {
               summary: {
                 type: 'string',
-                description: 'Ticket summary/title',
+                description: 'Clear, actionable ticket title (max 80 characters) - use exact wording from email when possible',
               },
               description: {
                 type: 'string',
-                description: 'Detailed description of the ticket',
+                description: 'MUST use the professional format provided in system prompt. Include only factual information from the email. Structure with: Problem Statement, Impact Assessment, Details from Email, Technical Information (if any), Email Context. Never invent details not in the email.',
               },
               issueType: {
                 type: 'string',
-                description: 'Type of issue: Bug, Story, Task, Epic, Subtask',
+                description: 'Type of issue: Bug (broken functionality), Task (work to do), Story (new feature), Incident (production issues). Choose based on email content only.',
               },
               priority: {
                 type: 'string',
-                description:
-                  'Priority level: Highest, High, Medium, Low, Lowest (optional)',
+                description: 'Priority based ONLY on email content: Highest (site down, critical failure), High (significant broken functionality), Medium (single feature issues), Low (minor/cosmetic)',
               },
               assignee: {
                 type: 'string',
-                description: 'Assignee username or email (optional)',
+                description: 'Assignee username or email address (optional) - only if explicitly mentioned in email',
               },
               labels: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Array of labels to add (optional)',
+                description: 'Array of relevant labels based on email content (optional) - e.g., "production-outage", "ui-bug", "security"',
               },
               components: {
                 type: 'array',
                 items: { type: 'string' },
-                description: 'Array of component names (optional)',
+                description: 'Array of component names only if clearly identifiable from email (optional) - e.g., "Frontend", "API", "Database"',
               },
               ...(sprintsEnabled && {
                 sprintId: {
@@ -402,7 +793,7 @@ Please analyze this email and take appropriate JIRA actions.`;
                 },
                 dueDate: {
                   type: 'string',
-                  description: 'Due date in YYYY-MM-DD format (optional)',
+                  description: 'Due date in YYYY-MM-DD format (optional) - only if mentioned in email',
                 },
               }),
             },
@@ -414,7 +805,7 @@ Please analyze this email and take appropriate JIRA actions.`;
         type: 'function' as const,
         function: {
           name: 'modify_jira_ticket',
-          description: 'Modify an existing JIRA ticket',
+          description: 'Modify an existing JIRA ticket with professional updates. New email attachments and embedded images are automatically added. CRITICAL: Only use information explicitly stated in the email - never hallucinate.',
           parameters: {
             type: 'object',
             properties: {
@@ -424,24 +815,24 @@ Please analyze this email and take appropriate JIRA actions.`;
               },
               summary: {
                 type: 'string',
-                description: 'New summary (optional)',
+                description: 'New summary only if email provides specific updated title (optional)',
               },
               status: {
                 type: 'string',
-                description: 'New status (optional)',
+                description: 'New status only if email explicitly mentions status change (e.g., "this is now fixed") (optional)',
               },
               assignee: {
                 type: 'string',
-                description: 'New assignee username or email (optional)',
+                description: 'New assignee only if explicitly mentioned in email (optional)',
               },
               comment: {
                 type: 'string',
-                description: 'Add comment to ticket (optional)',
+                description: 'Add professional comment with email context. Use format: "Update from email [timestamp]: [relevant email content]" Include only factual information from email. (optional)',
               },
               ...(sprintsEnabled && {
                 sprintId: {
                   type: 'number',
-                  description: 'New sprint ID (optional)',
+                  description: 'New sprint ID only if mentioned in email (optional)',
                 },
               }),
             },
@@ -577,6 +968,7 @@ Please analyze this email and take appropriate JIRA actions.`;
   private async executeToolCallsWithResults(
     toolCalls: any[],
     emailInput: EmailProcessingInput,
+    jiraConfig: JiraConfiguration | null,
   ): Promise<{
     actions: string[];
     jiraTicketsCreated?: string[];
@@ -599,6 +991,10 @@ Please analyze this email and take appropriate JIRA actions.`;
       const { name, arguments: args } = toolCall.function;
       const parsedArgs = JSON.parse(args);
 
+      const toolStartTime = Date.now();
+      const icon = this.getToolIcon(name);
+      this.logger.log(`🔧 Executing tool: ${icon} ${name}`);
+
       try {
         let toolResult: any = {};
 
@@ -608,47 +1004,112 @@ Please analyze this email and take appropriate JIRA actions.`;
             break;
 
           case 'read_jira_tickets':
-            toolResult = await this.executeSearchTickets(parsedArgs);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeSearchTickets(jiraConfig, parsedArgs);
+              this.logger.log(`   📋 Found ${toolResult.count} existing tickets`);
+            }
             break;
 
           case 'create_jira_ticket':
-            toolResult = await this.executeCreateTicket(parsedArgs, emailInput);
-            result.jiraTicketsCreated?.push(toolResult.ticket_key);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeCreateTicket(jiraConfig, parsedArgs, emailInput);
+              result.jiraTicketsCreated?.push(toolResult.ticket_key);
+              this.logger.log(`   🆕 Created ticket ${toolResult.ticket_key}: "${parsedArgs.summary}"`);
+              if (toolResult.attachments_uploaded > 0) {
+                this.logger.log(`   📎 Uploaded ${toolResult.attachments_uploaded} attachments`);
+              }
+            }
             break;
 
           case 'modify_jira_ticket':
-            toolResult = await this.executeModifyTicket(parsedArgs, emailInput);
-            result.jiraTicketsModified?.push(parsedArgs.ticketKey);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeModifyTicket(jiraConfig, parsedArgs, emailInput);
+              result.jiraTicketsModified?.push(parsedArgs.ticketKey);
+              this.logger.log(`   ✏️ Modified ticket ${parsedArgs.ticketKey}`);
+              if (toolResult.attachments_uploaded > 0) {
+                this.logger.log(`   📎 Added ${toolResult.attachments_uploaded} new attachments`);
+              }
+            }
             break;
 
           case 'get_project_users':
-            toolResult = await this.executeGetProjectUsers(parsedArgs);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeGetProjectUsers(jiraConfig, parsedArgs);
+              this.logger.log(`   👥 Retrieved ${toolResult.count} team members`);
+            }
             break;
 
           case 'get_user_workload':
-            toolResult = await this.executeGetUserWorkload(parsedArgs);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeGetUserWorkload(jiraConfig, parsedArgs);
+              this.logger.log(`   📊 Analyzed workload for ${toolResult.count} users`);
+            }
             break;
 
           case 'suggest_assignee':
-            toolResult = await this.executeSuggestAssignee(parsedArgs, emailInput);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeSuggestAssignee(jiraConfig, parsedArgs, emailInput);
+              const topSuggestion = toolResult.suggestion?.suggestions?.[0];
+              if (topSuggestion) {
+                this.logger.log(`   🎯 Top assignee suggestion: ${topSuggestion.user.displayName} (score: ${topSuggestion.score})`);
+              }
+            }
             break;
 
           case 'get_sprints':
-            toolResult = await this.executeGetSprints(parsedArgs);
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeGetSprints(jiraConfig, parsedArgs);
+              this.logger.log(`   🏃 Found ${toolResult.count} sprints`);
+            }
             break;
 
           case 'get_active_sprint':
-            toolResult = await this.executeGetActiveSprint();
+            if (!jiraConfig) {
+              toolResult = { error: 'JIRA not available - no organization context' };
+            } else {
+              toolResult = await this.executeGetActiveSprint(jiraConfig);
+              if (toolResult.sprint) {
+                this.logger.log(`   🏃‍♂️ Active sprint: ${toolResult.sprint.name}`);
+              } else {
+                this.logger.log(`   🚫 No active sprint found`);
+              }
+            }
             break;
 
           default:
             throw new Error(`Unknown tool: ${name}`);
         }
 
+        const duration = Date.now() - toolStartTime;
+        const durationStr = duration > 1000 ? `${(duration/1000).toFixed(1)}s` : `${duration}ms`;
+        
+        if (toolResult.error) {
+          this.logger.warn(`   ❌ Tool ${name} failed: ${toolResult.error} (${durationStr})`);
+        } else {
+          this.logger.log(`   ✅ Tool ${name} completed successfully (${durationStr})`);
+        }
+
         result.actions.push(toolResult.summary || 'No summary provided');
         result.toolCallResults.push(toolResult);
       } catch (error) {
-        this.logger.error(`Error executing tool call ${name}:`, error);
+        const duration = Date.now() - toolStartTime;
+        const durationStr = duration > 1000 ? `${(duration/1000).toFixed(1)}s` : `${duration}ms`;
+        
+        this.logger.error(`   💥 Tool ${name} threw exception: ${error.message} (${durationStr})`);
         result.actions.push(`Error with ${name}: ${error.message}`);
         result.toolCallResults.push({ error: error.message, tool: name });
       }
@@ -665,12 +1126,14 @@ Please analyze this email and take appropriate JIRA actions.`;
     });
   }
 
-  private async executeSearchTickets(args: any): Promise<any> {
+  private async executeSearchTickets(jiraConfig: JiraConfiguration, args: any): Promise<any> {
     const tickets = await this.jiraService.searchTickets(
+      jiraConfig,
       args.days || 7,
       args.status,
       args.assignee,
       args.sprintId,
+      args.searchText,
     );
     return {
       tickets: tickets.map((ticket) => ({
@@ -690,36 +1153,51 @@ Please analyze this email and take appropriate JIRA actions.`;
   }
 
   private async executeCreateTicket(
+    jiraConfig: JiraConfiguration,
     args: any,
     emailInput: EmailProcessingInput,
   ): Promise<any> {
     const sprintsEnabled =
       this.configService.get<string>('ENABLE_SPRINTS') === 'true';
-    const newTicket = await this.jiraService.createTicket({
+    
+    // Process attachments from the email
+    const attachmentData = this.processEmailAttachments(emailInput.attachments, emailInput.htmlBody);
+    
+    const newTicket = await this.jiraService.createTicket(jiraConfig, {
       summary: args.summary,
-      description: `${args.description}\n\nCreated from email: ${emailInput.subject}\nFrom: ${emailInput.from}`,
+      description: args.description,
       issueType: args.issueType,
       priority: args.priority,
       assignee: args.assignee,
       ...(sprintsEnabled && args.sprintId && { sprintId: args.sprintId }),
       ...(sprintsEnabled && args.dueDate && { dueDate: args.dueDate }),
+      ...(attachmentData.processedAttachments.length > 0 && { 
+        attachments: attachmentData.processedAttachments 
+      }),
     });
+    
     return {
       ticket_key: newTicket.key,
       ticket_id: newTicket.id,
-      summary: `Created JIRA ticket: ${newTicket.key}`,
+      summary: `Created JIRA ticket: ${newTicket.key}${attachmentData.processedAttachments.length > 0 ? ` with ${attachmentData.processedAttachments.length} attachments` : ''}`,
       status: newTicket.status,
       success: true,
+      attachments_uploaded: attachmentData.processedAttachments.length,
     };
   }
 
   private async executeModifyTicket(
+    jiraConfig: JiraConfiguration,
     args: any,
     emailInput: EmailProcessingInput,
   ): Promise<any> {
     const sprintsEnabledForModify =
       this.configService.get<string>('ENABLE_SPRINTS') === 'true';
-    await this.jiraService.updateTicket(args.ticketKey, {
+    
+    // Process attachments from the email
+    const attachmentData = this.processEmailAttachments(emailInput.attachments, emailInput.htmlBody);
+    
+    await this.jiraService.updateTicket(jiraConfig, args.ticketKey, {
       summary: args.summary,
       description: args.description,
       status: args.status,
@@ -730,19 +1208,25 @@ Please analyze this email and take appropriate JIRA actions.`;
       ...(sprintsEnabledForModify &&
         args.sprintId && { sprintId: args.sprintId }),
       ...(sprintsEnabledForModify && args.dueDate && { dueDate: args.dueDate }),
+      ...(attachmentData.processedAttachments.length > 0 && { 
+        attachments: attachmentData.processedAttachments 
+      }),
     });
+    
     return {
       ticket_key: args.ticketKey,
       updated_fields: Object.keys(args).filter(
         (key) => key !== 'ticketKey' && args[key],
       ),
       success: true,
-      summary: `Modified JIRA ticket: ${args.ticketKey}`,
+      summary: `Modified JIRA ticket: ${args.ticketKey}${attachmentData.processedAttachments.length > 0 ? ` with ${attachmentData.processedAttachments.length} new attachments` : ''}`,
+      attachments_uploaded: attachmentData.processedAttachments.length,
     };
   }
 
-  private async executeGetProjectUsers(args: any): Promise<any> {
+  private async executeGetProjectUsers(jiraConfig: JiraConfiguration, args: any): Promise<any> {
     const users = await this.jiraService.getProjectUsers(
+      jiraConfig,
       args.role,
       args.activeOnly,
     );
@@ -759,8 +1243,9 @@ Please analyze this email and take appropriate JIRA actions.`;
     };
   }
 
-  private async executeGetUserWorkload(args: any): Promise<any> {
+  private async executeGetUserWorkload(jiraConfig: JiraConfiguration, args: any): Promise<any> {
     const workloads = await this.jiraService.getUserWorkloads(
+      jiraConfig,
       args.userAccountIds,
       args.includeInProgress,
     );
@@ -780,8 +1265,9 @@ Please analyze this email and take appropriate JIRA actions.`;
     };
   }
 
-  private async executeSuggestAssignee(args: any, _emailInput: EmailProcessingInput): Promise<any> {
+  private async executeSuggestAssignee(jiraConfig: JiraConfiguration, args: any, _emailInput: EmailProcessingInput): Promise<any> {
     const suggestion = await this.jiraService.suggestAssignee(
+      jiraConfig,
       args.ticketType, 
       args.technologies || [], 
       args.priority || 'Medium', 
@@ -793,8 +1279,8 @@ Please analyze this email and take appropriate JIRA actions.`;
     };
   }
 
-  private async executeGetSprints(args: any): Promise<any> {
-    const sprints = await this.jiraService.getSprints(args.state);
+  private async executeGetSprints(jiraConfig: JiraConfiguration, args: any): Promise<any> {
+    const sprints = await this.jiraService.getSprints(jiraConfig, args.state);
     return {
       sprints: sprints.map((sprint) => ({
         id: sprint.id,
@@ -808,8 +1294,8 @@ Please analyze this email and take appropriate JIRA actions.`;
     };
   }
 
-  private async executeGetActiveSprint(): Promise<any> {
-    const activeSprint = await this.jiraService.getActiveSprint();
+  private async executeGetActiveSprint(jiraConfig: JiraConfiguration): Promise<any> {
+    const activeSprint = await this.jiraService.getActiveSprint(jiraConfig);
     if (activeSprint) {
       return {
         sprint: {
@@ -832,3 +1318,4 @@ Please analyze this email and take appropriate JIRA actions.`;
     }
   }
 }
+ 

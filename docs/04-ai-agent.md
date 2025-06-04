@@ -1,11 +1,12 @@
 # 🤖 AI Agent System
 
-This document provides an in-depth look at the AI-powered email processing system's core intelligence layer, including GPT-4o integration, tool calling, conversation management, and decision-making logic.
+This document provides an in-depth look at the AI-powered email processing system's core intelligence layer, including GPT-4o integration, tool calling, conversation management, decision-making logic, **and attachment/embedded image processing**.
 
 ## 📋 Table of Contents
 
 - [AI Agent Overview](#ai-agent-overview)
 - [System Prompt Design](#system-prompt-design)
+- [Attachment Processing](#attachment-processing)
 - [Tool Calling Architecture](#tool-calling-architecture)
 - [Conversation Management](#conversation-management)
 - [Decision Making Logic](#decision-making-logic)
@@ -17,10 +18,12 @@ This document provides an in-depth look at the AI-powered email processing syste
 The AI Agent is the brain of the email processing system, responsible for:
 
 - **Email Analysis**: Understanding email content, intent, and context
+- **Attachment Processing**: Handling email attachments and embedded images
 - **Decision Making**: Determining appropriate JIRA actions
 - **Tool Orchestration**: Executing multiple tool calls in sequence
 - **Context Preservation**: Maintaining conversation state across rounds
 - **Intelligent Routing**: Assigning work to appropriate team members
+- **File Management**: Uploading attachments to JIRA tickets automatically
 
 ### Core Components
 
@@ -33,6 +36,12 @@ The AI Agent is the brain of the email processing system, responsible for:
 │   - Message history tracking                    │
 │   - Context preservation                        │
 │                                                 │
+│ • Attachment Processor                          │
+│   - Email attachment parsing                    │
+│   - Embedded image extraction                   │
+│   - Base64 content handling                     │
+│   - JIRA upload coordination                    │
+│                                                 │
 │ • Tool Executor                                 │
 │   - Tool call validation                        │
 │   - Parallel execution                          │
@@ -42,87 +51,136 @@ The AI Agent is the brain of the email processing system, responsible for:
 │   - Email classification                        │
 │   - Action planning                             │
 │   - Priority assessment                         │
+│   - Attachment context analysis                 │
 └─────────────────────────────────────────────────┘
 ```
 
+## 📎 Attachment Processing
+
+### Supported Attachment Types
+
+The system automatically processes and uploads:
+
+#### **Regular Attachments**
+- **Documents**: PDF, DOC, DOCX, TXT
+- **Images**: PNG, JPG, GIF, SVG  
+- **Logs**: LOG, TXT (console logs, error logs)
+- **Code Files**: JS, TS, HTML, CSS, JSON
+- **Archives**: ZIP (for multiple files)
+- **Data Files**: HAR (network traces), XML, CSV
+
+#### **Embedded Images**
+- **HTML Email Images**: Referenced with `cid:` in HTML
+- **Inline Screenshots**: Pasted directly into email clients
+- **Diagrams**: Architecture diagrams, flowcharts
+- **UI Mockups**: Design files and wireframes
+
+### Processing Workflow
+
+```typescript
+1. Email Reception (Postmark Webhook)
+   ├── Regular attachments in Attachments array
+   └── Embedded images with ContentID
+
+2. AI Agent Processing
+   ├── processEmailAttachments()
+   │   ├── Convert Postmark format to internal format
+   │   ├── Identify embedded images by ContentID
+   │   ├── Process HTML cid: references
+   │   └── Generate attachment summary
+   │
+   └── Include in JIRA operations
+       ├── createTicket() with attachments
+       └── updateTicket() with new attachments
+
+3. JIRA Integration
+   ├── Convert base64 to binary
+   ├── Create FormData for upload
+   ├── Upload via JIRA Attachments API
+   └── Associate with ticket
+```
+
+### Example Processing
+
+**Email with Mixed Attachments:**
+```typescript
+{
+  "Attachments": [
+    {
+      "Name": "bug-screenshot.png",
+      "Content": "iVBORw0KGgoAAAANSUhEUgAAAAEAAAAB...",
+      "ContentType": "image/png",
+      "ContentID": "<screenshot001>"  // Embedded image
+    },
+    {
+      "Name": "error-log.txt", 
+      "Content": "VW5jYXVnaHQgUmVmZXJlbmNlRXJyb3I6...",
+      "ContentType": "text/plain"     // Regular attachment
+    }
+  ]
+}
+```
+
+**Processed Result:**
+- `bug-screenshot.png` → Embedded image, replaces `<img src="cid:screenshot001" />` in HTML
+- `error-log.txt` → Regular attachment
+- Both uploaded to JIRA ticket automatically
+
 ## 📝 System Prompt Design
 
-### Base System Prompt
+### Enhanced System Prompt with Attachment Awareness
 
-The system prompt is dynamically constructed based on configuration:
+The system prompt now includes attachment handling instructions:
 
 ```typescript
 private buildSystemPrompt(): string {
-  const sprintsEnabled = this.configService.get<string>('ENABLE_SPRINTS') === 'true';
-  const smartAssignment = this.configService.get<string>('ENABLE_SMART_ASSIGNMENT') === 'true';
-
   return `You are an AI assistant that processes emails and manages JIRA tickets intelligently.
 
 Your capabilities:
 - Read JIRA tickets from a specific time period
 - Get current date/time information  
-- Create new JIRA tickets
-- Modify existing JIRA tickets
-${sprintsEnabled ? '- Get sprint information (active, future, closed)\n- Assign tickets to sprints automatically' : ''}
-${smartAssignment ? '- Fetch available team members\n- Assign tickets to appropriate users based on context' : ''}
+- Create new JIRA tickets WITH ATTACHMENTS and embedded images
+- Modify existing JIRA tickets and ADD ATTACHMENTS
+- Process email attachments (files, images, documents) and upload them to JIRA tickets
+- Handle embedded images in HTML emails and convert them to JIRA attachments
 
-IMPORTANT WORKFLOW - Follow this order:
+ATTACHMENT HANDLING:
+- **AUTOMATICALLY INCLUDE ATTACHMENTS**: When creating or updating tickets, ALL email attachments will be automatically uploaded to JIRA
+- **EMBEDDED IMAGES**: HTML email embedded images (cid: references) are processed and uploaded as attachments
+- **ATTACHMENT CONTEXT**: Consider attachment types when categorizing tickets:
+  * Screenshots/images usually indicate bug reports or UI issues
+  * Log files suggest technical/infrastructure problems  
+  * Documents might be requirements or specifications
+  * Code files indicate development tasks
+- **SECURITY**: Only process allowed file types (images, documents, logs, code files)
+- **SIZE LIMITS**: Attachments are limited to 10MB total per email
 
-1. **FIRST ALWAYS SEARCH**: Before creating any new tickets, ALWAYS use read_jira_tickets to search for existing related tickets (search recent tickets from last 14-30 days)
-
-2. **ANALYZE EXISTING TICKETS**: Look for tickets with similar subjects, keywords, or topics. Pay attention to:
-   - Similar bug reports
-   - Related feature requests  
-   - Login/authentication issues
-   - Component or system names mentioned in the email
-
-3. **DECIDE ACTION BASED ON FINDINGS**:
-   - If email reports a bug is FIXED and you find existing open bug tickets → update existing ticket status to "Done" or add resolution comment
-   - If email is duplicate of existing ticket → add comment to existing ticket instead of creating new one
-   - If email is related to existing ticket → update or comment on existing ticket
-   - ONLY create new tickets if no related existing tickets are found
-
-${smartAssignment ? `4. **SMART ASSIGNMENT LOGIC**:
-   - **For Bug Reports**: Assign to developers with relevant expertise
-   - **For Feature Requests**: Assign to product owners or senior developers
-   - **For Support Issues**: Assign to support team members
-   - **For Infrastructure**: Assign to DevOps/Infrastructure team
-   - **Email Context Clues**: Look for mentions of specific team members, technologies, or components` : ''}
-
-Current time: ${new Date().toISOString()}
-JIRA Project: ${this.configService.get<string>('JIRA_PROJECT_KEY')}
-${sprintsEnabled ? '\nSprint Management: ENABLED' : '\nSprint Management: DISABLED'}
-${smartAssignment ? '\nSmart Assignment: ENABLED' : '\nSmart Assignment: DISABLED'}
-
-Remember: Search first, analyze context, then decide whether to update existing tickets or create new ones!`;
+Remember: You have access to email attachments and embedded images. Use them to provide better context and automatically attach them to JIRA tickets for complete documentation.`;
 }
 ```
 
-### Contextual Prompt Enhancement
-
-The agent considers email context for smarter decisions:
+### Contextual Prompt with Attachment Analysis
 
 ```typescript
 private buildUserPrompt(input: EmailProcessingInput): string {
-  return `Process this email and determine what JIRA actions are needed:
+  // Process embedded images from HTML
+  const attachmentData = this.processEmailAttachments(input.attachments, input.htmlBody);
+  
+  return `Email Details:
+- From: ${input.from}
+- Subject: ${input.subject}
+- Body: ${input.textBody}
+${input.htmlBody ? `- HTML Body: ${attachmentData.processedHtml}` : ''}
+- Received At: ${input.receivedAt}
+${input.attachments.length > 0 ? `- Attachments: ${input.attachments.length} files${attachmentData.attachmentSummary}` : ''}
 
-From: ${input.from}
-Subject: ${input.subject}
-Received: ${input.receivedAt}
-Message ID: ${input.messageId}
+Email Analysis:
+- Type: ${emailType}
+- Priority Keywords: ${priorityKeywords.join(', ') || 'None'}
+- Technologies Mentioned: ${technologies.join(', ') || 'None'}
+- Users Mentioned: ${mentionedUsers.join(', ') || 'None'}
 
-Email Content:
-${input.textBody || input.htmlBody}
-
-${input.attachments.length > 0 ? `Attachments: ${input.attachments.length} files` : ''}
-
-Additional Context:
-- Email sender domain: ${this.extractDomain(input.from)}
-- Email priority indicators: ${this.detectPriorityKeywords(input.subject, input.textBody)}
-- Mentioned technologies: ${this.extractTechnologies(input.textBody)}
-- Potential assignees mentioned: ${this.extractMentionedUsers(input.textBody)}
-
-Please analyze this email and take appropriate JIRA actions.`;
+Please analyze this email and take appropriate actions. Pay special attention to any attachments or embedded images that might be relevant for bug reports, feature requests, or documentation.`;
 }
 ```
 
@@ -152,12 +210,12 @@ The agent has access to these tools:
 
 {
   name: 'create_jira_ticket',
-  description: 'Create a new JIRA ticket',
+  description: 'Create a new JIRA ticket. Email attachments and embedded images are automatically included.',
   parameters: {
-    summary: 'Ticket summary/title',
-    description: 'Detailed description',
-    issueType: 'Bug, Story, Task, Epic, Subtask',
-    priority: 'Highest, High, Medium, Low, Lowest',
+    summary: 'Ticket title/summary',
+    description: 'Detailed description. Email context will be automatically appended.',
+    issueType: 'Bug, Story, Task, Epic, etc.',
+    priority: 'Highest, High, Medium, Low',
     assignee: 'Username or email to assign',
     labels: 'Array of labels to add',
     components: 'Array of component names'
@@ -166,13 +224,13 @@ The agent has access to these tools:
 
 {
   name: 'modify_jira_ticket',
-  description: 'Modify an existing JIRA ticket',
+  description: 'Modify an existing JIRA ticket. New email attachments and embedded images are automatically added.',
   parameters: {
     ticketKey: 'JIRA ticket key (e.g., PROJ-123)',
     summary: 'New summary (optional)',
     status: 'New status (optional)',
     assignee: 'New assignee (optional)',
-    comment: 'Add comment (optional)'
+    comment: 'Add comment. Email context will be automatically appended. (optional)'
   }
 }
 ```
@@ -490,27 +548,6 @@ private async executeParallelTools(toolCalls: ToolCall[]): Promise<ToolResult[]>
   }
   
   return [...parallelResults, ...sequentialResults];
-}
-```
-
-### Caching Strategies
-
-```typescript
-private readonly userCache = new Map<string, { data: any; timestamp: number }>();
-private readonly CACHE_TTL = 5 * 60 * 1000; // 5 minutes
-
-private async getCachedProjectUsers(): Promise<JiraUser[]> {
-  const cacheKey = `project_users_${this.configService.get('JIRA_PROJECT_KEY')}`;
-  const cached = this.userCache.get(cacheKey);
-  
-  if (cached && Date.now() - cached.timestamp < this.CACHE_TTL) {
-    return cached.data;
-  }
-  
-  const users = await this.jiraService.getProjectUsers();
-  this.userCache.set(cacheKey, { data: users, timestamp: Date.now() });
-  
-  return users;
 }
 ```
 

@@ -8,6 +8,8 @@ import { QueueModule } from './queue/queue.module';
 import { JiraModule } from './jira/jira.module';
 import { AiAgentModule } from './ai-agent/ai-agent.module';
 import { DashboardModule } from './dashboard/dashboard.module';
+import { AuthModule } from './auth/auth.module';
+import { DomainModule } from './domain/domain.module';
 
 @Module({
   imports: [
@@ -24,11 +26,13 @@ import { DashboardModule } from './dashboard/dashboard.module';
         tls: process.env.REDIS_HOST?.includes('upstash.io') ? {} : undefined,
       },
     }),
+    AuthModule,
     EmailModule,
     QueueModule,
     JiraModule,
     AiAgentModule,
     DashboardModule,
+    DomainModule,
   ],
   controllers: [AppController],
   providers: [AppService],

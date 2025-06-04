@@ -2,7 +2,8 @@ import { Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { InjectQueue } from '@nestjs/bullmq';
 import { Queue } from 'bullmq';
-import { JiraService, ProjectDashboard } from '../jira/jira.service';
+import { JiraService, ProjectDashboard, JiraConfiguration } from '../jira/jira.service';
+import { JiraConfigService } from '../jira/jira-config.service';
 
 export interface SystemStats {
   server: {
@@ -46,20 +47,34 @@ export class DashboardService {
   constructor(
     public readonly configService: ConfigService,
     public readonly jiraService: JiraService,
+    private readonly jiraConfigService: JiraConfigService,
     @InjectQueue('email-processing') public readonly emailQueue: Queue,
   ) {}
 
   /**
    * Get comprehensive dashboard data including system stats and JIRA information
    */
-  async getDashboardData(): Promise<DashboardData> {
+  async getDashboardData(userId?: string, organizationId?: string): Promise<DashboardData> {
     try {
       this.logger.log('Fetching comprehensive dashboard data');
 
-      const [systemStats, jiraData] = await Promise.all([
-        this.getSystemStats(),
-        this.jiraService.getProjectDashboard(),
-      ]);
+      // Always get system stats
+      const systemStats = await this.getSystemStats();
+
+      // Try to get JIRA data, but handle gracefully if not configured
+      let jiraData: ProjectDashboard;
+      try {
+        if (userId && organizationId) {
+          const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+          jiraData = await this.jiraService.getProjectDashboard(jiraConfig);
+        } else {
+          this.logger.log('No user/organization context - returning empty dashboard data for onboarding');
+          jiraData = this.getEmptyDashboardData('No User Context', 'Please authenticate and select an organization to view JIRA data');
+        }
+      } catch (error) {
+        this.logger.warn('JIRA data unavailable, using fallback data:', error.message);
+        jiraData = this.getEmptyDashboardData('JIRA Unavailable', `JIRA connection unavailable: ${error.message}`);
+      }
 
       return {
         systemStats,
@@ -70,6 +85,38 @@ export class DashboardService {
       this.logger.error('Error fetching dashboard data:', error.message);
       throw new Error(`Failed to fetch dashboard data: ${error.message}`);
     }
+  }
+
+  private getEmptyDashboardData(title: string, description: string): ProjectDashboard {
+    return {
+      projectInfo: {
+        key: '',
+        name: title,
+        description: description,
+        issueTypes: [],
+        priorities: [],
+        statuses: []
+      },
+      statistics: {
+        totalTickets: 0,
+        openTickets: 0,
+        closedTickets: 0,
+        ticketsByType: {},
+        ticketsByStatus: {},
+        ticketsByPriority: {},
+        averageResolutionTime: 0
+      },
+      recentActivity: {
+        recentTickets: [],
+        recentComments: [],
+        recentAssignments: []
+      },
+      teamInfo: {
+        totalUsers: 0,
+        activeUsers: 0,
+        userWorkloads: []
+      }
+    };
   }
 
   /**
@@ -191,60 +238,111 @@ export class DashboardService {
   /**
    * Get JIRA project users with their current workloads
    */
-  async getProjectUsers() {
-    return this.jiraService.getProjectUsers();
+  async getProjectUsers(userId: string, organizationId: string) {
+    try {
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      return await this.jiraService.getProjectUsers(jiraConfig);
+    } catch (error) {
+      this.logger.warn('Error fetching project users:', error.message);
+      return [];
+    }
   }
 
   /**
    * Get JIRA tickets with optional filtering
    */
   async getJiraTickets(
+    userId: string,
+    organizationId: string,
     days?: number,
     status?: string,
     assignee?: string,
     searchText?: string,
   ) {
-    return this.jiraService.searchTickets(
-      days,
-      status,
-      assignee,
-      undefined,
-      searchText,
-    );
+    try {
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      return await this.jiraService.searchTickets(
+        jiraConfig,
+        days,
+        status,
+        assignee,
+        undefined,
+        searchText,
+      );
+    } catch (error) {
+      this.logger.warn('Error fetching JIRA tickets:', error.message);
+      return [];
+    }
   }
 
   /**
    * Get sprint information (if sprints are enabled)
    */
-  async getSprintInfo() {
-    if (this.configService.get<string>('ENABLE_SPRINTS') !== 'true') {
-      return { error: 'Sprint functionality is disabled' };
+  async getSprintInfo(userId: string, organizationId: string) {
+    try {
+      if (this.configService.get<string>('ENABLE_SPRINTS') !== 'true') {
+        return { 
+          error: 'Sprint functionality is disabled',
+          activeSprints: [],
+          upcomingSprints: [],
+          completedSprints: []
+        };
+      }
+
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      const [activeSprints, upcomingSprints, completedSprints] =
+        await Promise.all([
+          this.jiraService.getSprints(jiraConfig, 'active'),
+          this.jiraService.getSprints(jiraConfig, 'future'),
+          this.jiraService.getSprints(jiraConfig, 'closed'),
+        ]);
+
+      return {
+        activeSprints,
+        upcomingSprints: upcomingSprints.slice(0, 3),
+        completedSprints: completedSprints.slice(0, 5),
+      };
+    } catch (error) {
+      this.logger.warn('Error fetching sprint info:', error.message);
+      return {
+        activeSprints: [],
+        upcomingSprints: [],
+        completedSprints: [],
+        error: error.message
+      };
     }
-
-    const [activeSprints, upcomingSprints, completedSprints] =
-      await Promise.all([
-        this.jiraService.getSprints('active'),
-        this.jiraService.getSprints('future'),
-        this.jiraService.getSprints('closed'),
-      ]);
-
-    return {
-      activeSprints,
-      upcomingSprints: upcomingSprints.slice(0, 3),
-      completedSprints: completedSprints.slice(0, 5),
-    };
   }
 
   /**
    * Get user workload information
    */
-  async getUserWorkloads(userAccountIds?: string[]) {
-    if (!userAccountIds) {
-      const users = await this.jiraService.getProjectUsers();
-      userAccountIds = users.map((u) => u.accountId);
-    }
+  async getUserWorkloads(userId: string, organizationId: string, userAccountIds?: string[]) {
+    try {
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
 
-    return this.jiraService.getUserWorkloads(userAccountIds);
+      if (!userAccountIds) {
+        const users = await this.jiraService.getProjectUsers(jiraConfig);
+        userAccountIds = users.map((u) => u.accountId);
+      }
+
+      return await this.jiraService.getUserWorkloads(jiraConfig, userAccountIds);
+    } catch (error) {
+      this.logger.warn('Error fetching user workloads:', error.message);
+      return {};
+    }
+  }
+
+  /**
+   * Get project metadata
+   */
+  async getProjectMetadata(userId: string, organizationId: string) {
+    try {
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      return await this.jiraService.getProjectMetadata(jiraConfig);
+    } catch (error) {
+      this.logger.warn('Error fetching project metadata:', error.message);
+      throw error;
+    }
   }
 
   /**
@@ -259,11 +357,11 @@ export class DashboardService {
   /**
    * Get system health status
    */
-  async getHealthStatus() {
+  async getHealthStatus(userId?: string, organizationId?: string) {
     try {
       const [queueHealth, jiraHealth] = await Promise.all([
         this.checkQueueHealth(),
-        this.checkJiraHealth(),
+        this.checkJiraHealth(userId, organizationId),
       ]);
 
       const overall =
@@ -299,12 +397,18 @@ export class DashboardService {
     }
   }
 
-  private async checkJiraHealth() {
+  private async checkJiraHealth(userId?: string, organizationId?: string) {
     try {
-      await this.jiraService.getProjectMetadata();
+      if (!userId || !organizationId) {
+        return { healthy: false, error: 'No user/organization context' };
+      }
+      
+      const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, organizationId);
+      await this.jiraService.getProjectMetadata(jiraConfig);
       return { healthy: true };
     } catch (error) {
       return { healthy: false, error: error.message };
     }
   }
 }
+ 

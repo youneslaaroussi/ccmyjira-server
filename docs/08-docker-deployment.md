@@ -589,10 +589,6 @@ const requiredVars = [
   'REDIS_HOST',
   'REDIS_PORT', 
   'OPENAI_API_KEY',
-  'JIRA_BASE_URL',
-  'JIRA_USERNAME',
-  'JIRA_API_TOKEN',
-  'JIRA_PROJECT_KEY',
   'POSTMARK_SERVER_TOKEN',
 ];
 
