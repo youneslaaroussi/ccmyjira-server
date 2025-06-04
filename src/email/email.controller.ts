@@ -134,8 +134,14 @@ export class EmailController {
         );
       }
 
-      // Queue the email processing job
-      const jobId = await this.emailService.queueEmailProcessing(payload);
+      // Check if this is a demo request
+      const isDemo = req.isDemo || false;
+      if (isDemo) {
+        this.logger.log('🎭 Demo mode detected - will use demo JIRA configuration');
+      }
+
+      // Queue the email processing job with demo flag
+      const jobId = await this.emailService.queueEmailProcessing(payload, isDemo);
 
       this.logger.log(`✅ Email processing queued with job ID: ${jobId}`);
       return { success: true, jobId };

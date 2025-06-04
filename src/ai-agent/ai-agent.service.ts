@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { JiraService, JiraConfiguration } from '../jira/jira.service';
 import { JiraConfigService } from '../jira/jira-config.service';
+import { DemoService } from '../common/services/demo.service';
 const mdToAdf = require('md-to-adf');
 
 export interface EmailProcessingInput {
@@ -36,6 +37,7 @@ export class AiAgentService {
     private readonly configService: ConfigService,
     private readonly jiraService: JiraService,
     private readonly jiraConfigService: JiraConfigService,
+    private readonly demoService: DemoService,
   ) {
     this.openai = new OpenAI({
       apiKey: this.configService.get<string>('OPENAI_API_KEY'),
@@ -120,7 +122,36 @@ export class AiAgentService {
       let jiraConfig: JiraConfiguration | null = null;
       let availableUsers: any[] = [];
       
-      if (input.userId && input.organizationId) {
+      // Check if this is demo mode - use demo configuration
+      if (input.isDemoMode) {
+        try {
+          jiraConfig = this.demoService.getDemoJiraConfig();
+          this.logger.log(`🎭 Using demo JIRA configuration for project: ${jiraConfig.projectKey}`);
+          trace.decisions.push(`🎭 Demo mode: Using demo JIRA configuration`);
+          
+          // ALWAYS fetch users automatically when JIRA is available
+          try {
+            this.logger.log(`🔍 Attempting to fetch demo users for assignment context...`);
+            availableUsers = await this.jiraService.getProjectUsers(jiraConfig, undefined, true);
+            this.logger.log(`🎯 Auto-fetched ${availableUsers.length} available demo users for assignment context`);
+            
+            // Log user details for debugging
+            availableUsers.forEach((user, index) => {
+              this.logger.log(`   ${index + 1}. ${user.displayName} (${user.emailAddress}) - ID: ${user.accountId}`);
+            });
+            
+            trace.decisions.push(`👥 Fetched ${availableUsers.length} demo users for intelligent assignment`);
+          } catch (userError) {
+            this.logger.error(`❌ Failed to fetch demo users: ${userError.message}`);
+            this.logger.error(`❌ Demo user fetch error details:`, userError);
+            trace.decisions.push(`⚠️ Failed to fetch demo users: ${userError.message}`);
+          }
+          
+        } catch (error) {
+          this.logger.warn(`Could not resolve demo JIRA configuration: ${error.message}`);
+          trace.decisions.push(`❌ Demo JIRA integration unavailable: ${error.message}`);
+        }
+      } else if (input.userId && input.organizationId) {
         try {
           jiraConfig = await this.jiraConfigService.getJiraConfig(input.userId, input.organizationId);
           this.logger.log(`JIRA configuration resolved for organization: ${input.organizationId}`);
@@ -149,8 +180,8 @@ export class AiAgentService {
           trace.decisions.push(`❌ JIRA integration unavailable: ${error.message}`);
         }
       } else {
-        this.logger.warn('No user/organization context provided - JIRA operations will be disabled');
-        trace.decisions.push('⚠️ No user/organization context - JIRA operations disabled');
+        this.logger.warn('No demo mode and no user/organization context provided - JIRA operations will be disabled');
+        trace.decisions.push('⚠️ No demo mode and no user/organization context - JIRA operations disabled');
       }
 
       const systemPrompt = this.buildSystemPrompt(jiraConfig, availableUsers);

@@ -8,6 +8,7 @@ import { DomainLookupService, DomainLookupResult } from '../../domain/domain-loo
 export interface EmailProcessingJobData {
   emailData: PostmarkWebhookDto;
   receivedAt: string;
+  isDemo?: boolean;
 }
 
 @Processor('email-processing')
@@ -25,12 +26,17 @@ export class EmailProcessor extends WorkerHost {
     this.logger.log(`Processing email job ${job.id}`);
 
     try {
-      const { emailData, receivedAt } = job.data;
+      const { emailData, receivedAt, isDemo: jobIsDemo } = job.data;
 
       // Log email details
       this.logger.log(
         `Processing email from: ${emailData.From}, subject: ${emailData.Subject}`,
       );
+
+      // Check if this is explicitly a demo job
+      if (jobIsDemo) {
+        this.logger.log('🎭 Demo mode explicitly set from /demo/* route');
+      }
 
       // Look up organization and user context from email domain
       let domainLookup: DomainLookupResult | null = null;
@@ -71,6 +77,9 @@ export class EmailProcessor extends WorkerHost {
         }
       }
 
+      // Determine if we should use demo mode (either from job flag or domain lookup)
+      const shouldUseDemo = jobIsDemo || domainLookup?.isDemoMode || false;
+
       // Use AI agent to process the email and determine actions
       const result = await this.aiAgentService.processEmail({
         from: emailData.From || '',
@@ -84,7 +93,7 @@ export class EmailProcessor extends WorkerHost {
         // Include organization/user context if found
         userId: domainLookup?.userId,
         organizationId: domainLookup?.organizationId,
-        isDemoMode: domainLookup?.isDemoMode || false,
+        isDemoMode: shouldUseDemo,
       });
 
       this.logger.log(`Email processing completed for job ${job.id}:`, result);
@@ -93,7 +102,7 @@ export class EmailProcessor extends WorkerHost {
       if (domainLookup) {
         try {
           // This could be enhanced to log to email_processing_logs table
-          const orgType = domainLookup.isDemoMode ? 'demo organization' : 'organization';
+          const orgType = domainLookup.isDemoMode || jobIsDemo ? 'demo organization' : 'organization';
           this.logger.log(
             `📊 Processing successful for ${orgType} ${domainLookup.organization.name}: ${result.summary}`,
           );

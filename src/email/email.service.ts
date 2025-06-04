@@ -12,13 +12,14 @@ export class EmailService {
   /**
    * Queue email processing job
    */
-  async queueEmailProcessing(payload: PostmarkWebhookDto): Promise<string> {
+  async queueEmailProcessing(payload: PostmarkWebhookDto, isDemo: boolean = false): Promise<string> {
     try {
       const job = await this.emailQueue.add(
         'process-email',
         {
           emailData: payload,
           receivedAt: new Date().toISOString(),
+          isDemo: isDemo,
         },
         {
           attempts: parseInt(process.env.QUEUE_MAX_ATTEMPTS || '3'),
