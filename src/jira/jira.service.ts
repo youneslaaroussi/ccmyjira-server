@@ -111,6 +111,7 @@ export interface ProjectDashboard {
 export interface CreateTicketDto {
   summary: string;
   description: string;
+  adfDescription?: any; // Atlassian Document Format for properly formatted descriptions
   issueType: string;
   priority?: string;
   assignee?: string;
@@ -501,7 +502,8 @@ export class JiraService {
   }
 
   /**
-   * Suggest the best assignee for a ticket based on various factors
+   * Get user and workload data for AI-powered assignment suggestions
+   * No manual scoring - let the AI decide based on raw data
    */
   async suggestAssignee(
     jiraConfig: JiraConfiguration,
@@ -510,125 +512,43 @@ export class JiraService {
     priority: string = 'Medium',
     component?: string,
   ): Promise<{
-    suggestions: Array<{ user: JiraUser; score: number; reasoning: string[] }>;
+    users: JiraUser[];
+    workloads: { [accountId: string]: UserWorkload };
+    context: {
+      ticketType: string;
+      technologies: string[];
+      priority: string;
+      component?: string;
+    };
   }> {
     try {
       this.logger.log(
-        `Suggesting assignee for ${ticketType} ticket with priority ${priority}`,
+        `Getting user data for AI assignment decision: ${ticketType} ticket with priority ${priority}`,
       );
 
+      // Get all users and their workloads - let AI decide who's best
       const users = await this.getProjectUsers(jiraConfig);
       const userAccountIds = users.map((u) => u.accountId);
       const workloads = await this.getUserWorkloads(jiraConfig, userAccountIds);
 
-      const suggestions = users.map((user) => {
-        const workload = workloads[user.accountId];
-        let score = 0;
-        const reasoning: string[] = [];
-
-        // Base score for active users
-        if (user.active) {
-          score += 10;
-          reasoning.push('Active user');
-        }
-
-        // Role-based scoring
-        const userRoles = (user.roles || []).map((r) => r.toLowerCase());
-        if (ticketType === 'Bug') {
-          if (
-            userRoles.some(
-              (r) => r.includes('developer') || r.includes('engineer'),
-            )
-          ) {
-            score += 20;
-            reasoning.push('Developer/Engineer role suitable for bug fixes');
-          }
-        } else if (ticketType === 'Story') {
-          if (
-            userRoles.some((r) => r.includes('product') || r.includes('owner'))
-          ) {
-            score += 15;
-            reasoning.push('Product role suitable for stories');
-          }
-          if (userRoles.some((r) => r.includes('developer'))) {
-            score += 10;
-            reasoning.push('Developer can implement stories');
-          }
-        } else if (ticketType === 'Task') {
-          score += 5; // Any role can handle tasks
-          reasoning.push('Can handle general tasks');
-        }
-
-        // Priority-based scoring
-        if (priority === 'Highest' || priority === 'High') {
-          if (
-            userRoles.some((r) => r.includes('senior') || r.includes('lead'))
-          ) {
-            score += 15;
-            reasoning.push('Senior/Lead developer for high priority tickets');
-          }
-        }
-
-        // Workload consideration
-        if (workload) {
-          const totalWork = workload.totalTickets + workload.storyPoints / 5; // Normalize story points
-          if (totalWork < 5) {
-            score += 15;
-            reasoning.push('Low current workload');
-          } else if (totalWork < 10) {
-            score += 5;
-            reasoning.push('Moderate workload');
-          } else {
-            score -= 10;
-            reasoning.push('High current workload');
-          }
-
-          if (workload.overdue > 0) {
-            score -= 5;
-            reasoning.push(`${workload.overdue} overdue tickets`);
-          }
-        }
-
-        // Technology/skill matching (would need custom fields in real implementation)
-        if (technologies.length > 0) {
-          // This is a placeholder - in real implementation, you'd match against user skills
-          const commonTechs = [
-            'javascript',
-            'typescript',
-            'react',
-            'node',
-            'python',
-            'java',
-          ];
-          const matchedTechs = technologies.filter((tech) =>
-            commonTechs.includes(tech.toLowerCase()),
-          );
-          if (matchedTechs.length > 0) {
-            score += matchedTechs.length * 5;
-            reasoning.push(`Skills match: ${matchedTechs.join(', ')}`);
-          }
-        }
-
-        return {
-          user,
-          score: Math.max(0, score),
-          reasoning,
-        };
-      });
-
-      // Sort by score and return top suggestions
-      suggestions.sort((a, b) => b.score - a.score);
-
-      this.logger.log(`Generated ${suggestions.length} assignee suggestions`);
+      this.logger.log(`Retrieved ${users.length} users and workload data for AI decision`);
+      
       return {
-        suggestions: suggestions.slice(0, 5), // Top 5 suggestions
+        users,
+        workloads,
+        context: {
+          ticketType,
+          technologies,
+          priority,
+          component,
+        },
       };
     } catch (error) {
       this.logger.error(
-        'Error suggesting assignee:',
+        'Error getting user data for assignment:',
         error.response?.data || error.message,
       );
-      throw new Error(`Failed to suggest assignee: ${error.message}`);
+      throw new Error(`Failed to get user data for assignment: ${error.message}`);
     }
   }
 
@@ -809,7 +729,7 @@ export class JiraService {
             key: jiraConfig.projectKey,
           },
           summary: ticketData.summary,
-          description: {
+          description: ticketData.adfDescription || {
             type: 'doc',
             version: 1,
             content: [

@@ -71,6 +71,9 @@ dependencies:
   ioredis:
     specifier: ^5.3.2
     version: 5.6.1
+  md-to-adf:
+    specifier: ^0.6.4
+    version: 0.6.4
   openai:
     specifier: ^4.28.0
     version: 4.104.0
@@ -3400,6 +3403,11 @@ packages:
     hasBin: true
     dev: true
 
+  /adf-builder@3.3.0:
+    resolution: {integrity: sha512-zl5Sk2HtJk/E+gBnD0g51w5wIEEujaAbzsBhSsteO8Fnef7v+7pvas0FeQuLCAgOxrwy945HWAB1gQ4yjPI3/g==}
+    deprecated: Use @atlaskit/adf-utils instead
+    dev: false
+
   /agentkeepalive@4.6.0:
     resolution: {integrity: sha512-kja8j7PjmncONqaTsB8fQ+wE2mSU2DJ9D4XKoJ5PFWIdRMa6SLSN1ff4mOr4jCbfRSsxR4keIiySJU0N9T5hIQ==}
     engines: {node: '>= 8.0.0'}
@@ -6144,6 +6152,12 @@ packages:
       tmpl: 1.0.5
     dev: true
 
+  /marked@0.8.2:
+    resolution: {integrity: sha512-EGwzEeCcLniFX51DhTpmTom+dSA/MG/OBUDjnWtHbEnjAH180VzUeAw+oE4+Zv+CoYBWyRlYOTR0N8SO9R1PVw==}
+    engines: {node: '>= 8.16.2'}
+    hasBin: true
+    dev: false
+
   /marked@7.0.4:
     resolution: {integrity: sha512-t8eP0dXRJMtMvBojtkcsA7n48BkauktUKzfkPSCq85ZMTJ0v76Rke4DYz01omYpPTUh4p/f7HePgRo3ebG8+QQ==}
     engines: {node: '>= 16'}
@@ -6153,6 +6167,13 @@ packages:
   /math-intrinsics@1.1.0:
     resolution: {integrity: sha512-/IXtbwEk5HTPyEwyKX6hGkYXxM9nbj64B+ilVJnC/R6B0pH5G4V3b0pVbL7DBj4tkhBAppbQUlf6F6Xl9LHu1g==}
     engines: {node: '>= 0.4'}
+
+  /md-to-adf@0.6.4:
+    resolution: {integrity: sha512-MynWm2w+adyzeaCJGXoOjgHAAhql0I9jR2Bq55hM7GQ05u6cGX7jThdWN6dgVSGnBmuAGmZGy2rDGBP+hJRckA==}
+    dependencies:
+      adf-builder: 3.3.0
+      marked: 0.8.2
+    dev: false
 
   /md-to-react-email@5.0.5(react@19.1.0):
     resolution: {integrity: sha512-OvAXqwq57uOk+WZqFFNCMZz8yDp8BD3WazW1wAKHUrPbbdr89K9DWS6JXY09vd9xNdPNeurI8DU/X4flcfaD8A==}

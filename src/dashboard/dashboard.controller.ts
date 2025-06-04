@@ -555,28 +555,40 @@ export class DashboardController {
     schema: {
       type: 'object',
       properties: {
-        suggestions: {
+        availableUsers: {
           type: 'array',
           items: {
             type: 'object',
             properties: {
-              user: {
+              accountId: { type: 'string', example: 'user123' },
+              displayName: { type: 'string', example: 'John Doe' },
+              emailAddress: { type: 'string', example: 'john.doe@company.com' },
+              username: { type: 'string', example: 'john.doe' },
+              active: { type: 'boolean', example: true },
+              roles: { type: 'array', items: { type: 'string' }, example: ['Developers'] },
+              workload: {
                 type: 'object',
                 properties: {
-                  accountId: { type: 'string', example: 'user123' },
-                  displayName: { type: 'string', example: 'John Doe' },
-                  emailAddress: { type: 'string', example: 'john.doe@company.com' },
+                  totalTickets: { type: 'number', example: 12 },
+                  inProgressTickets: { type: 'number', example: 3 },
+                  todoTickets: { type: 'number', example: 0 },
+                  storyPoints: { type: 'number', example: 21 },
+                  overdue: { type: 'number', example: 1 },
                 },
-              },
-              score: { type: 'number', example: 85 },
-              reasoning: {
-                type: 'array',
-                items: { type: 'string' },
-                example: ['Developer role suitable for bug fixes', 'Low current workload', 'Skills match: javascript, react'],
               },
             },
           },
         },
+        context: {
+          type: 'object',
+          properties: {
+            ticketType: { type: 'string', example: 'Bug' },
+            technologies: { type: 'array', items: { type: 'string' }, example: ['javascript', 'react'] },
+            priority: { type: 'string', example: 'High' },
+            component: { type: 'string', example: 'authentication' },
+          },
+        },
+        message: { type: 'string', example: 'Retrieved 3 available users for assignment consideration' },
       },
     },
   })
@@ -605,16 +617,37 @@ export class DashboardController {
       // Get JIRA config to check if properly configured
       try {
         const jiraConfig = await this.jiraConfigService.getJiraConfig(userId, orgId);
-        return await this.dashboardService.jiraService.suggestAssignee(
+        const assignmentData = await this.dashboardService.jiraService.suggestAssignee(
           jiraConfig,
           ticketType,
           techArray,
           priority || 'Medium',
           component,
         );
+        
+        return {
+          availableUsers: assignmentData.users.map(user => ({
+            accountId: user.accountId,
+            displayName: user.displayName,
+            emailAddress: user.emailAddress,
+            username: user.username,
+            active: user.active,
+            roles: user.roles || [],
+            workload: assignmentData.workloads[user.accountId] || {
+              totalTickets: 0,
+              inProgressTickets: 0,
+              todoTickets: 0,
+              storyPoints: 0,
+              overdue: 0
+            }
+          })),
+          context: assignmentData.context,
+          message: `Retrieved ${assignmentData.users.length} available users for assignment consideration`,
+        };
       } catch (configError) {
         return {
-          suggestions: [],
+          availableUsers: [],
+          context: { ticketType, technologies: techArray, priority: priority || 'Medium', component },
           message: 'JIRA not configured - smart assignment unavailable',
           fallbackRecommendation: 'Complete organization JIRA setup to enable smart ticket assignment',
           error: configError.message

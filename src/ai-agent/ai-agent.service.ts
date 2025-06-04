@@ -3,6 +3,7 @@ import { ConfigService } from '@nestjs/config';
 import OpenAI from 'openai';
 import { JiraService, JiraConfiguration } from '../jira/jira.service';
 import { JiraConfigService } from '../jira/jira-config.service';
+const mdToAdf = require('md-to-adf');
 
 export interface EmailProcessingInput {
   from: string;
@@ -38,6 +39,36 @@ export class AiAgentService {
     this.openai = new OpenAI({
       apiKey: this.configService.get<string>('OPENAI_API_KEY'),
     });
+  }
+
+  /**
+   * Convert markdown text to Atlassian Document Format (ADF)
+   * This ensures JIRA descriptions are properly formatted instead of showing raw markdown
+   */
+  private convertMarkdownToAdf(markdownText: string): any {
+    try {
+      // Convert markdown to ADF using the md-to-adf library
+      const adfDocument = mdToAdf(markdownText);
+      return adfDocument;
+    } catch (error) {
+      this.logger.warn(`Failed to convert markdown to ADF: ${error.message}. Falling back to plain text.`);
+      // Fallback to plain text ADF structure if conversion fails
+      return {
+        type: 'doc',
+        version: 1,
+        content: [
+          {
+            type: 'paragraph',
+            content: [
+              {
+                type: 'text',
+                text: markdownText.replace(/[#*_`~]/g, ''), // Strip markdown characters
+              },
+            ],
+          },
+        ],
+      };
+    }
   }
 
   async processEmail(
@@ -396,16 +427,16 @@ ${jiraAvailable ? `Your capabilities:
 - Create new JIRA tickets WITH ATTACHMENTS and embedded images
 - Modify existing JIRA tickets and ADD ATTACHMENTS
 - Process email attachments (files, images, documents) and upload them to JIRA tickets
-- Handle embedded images in HTML emails and convert them to JIRA attachments${sprintsEnabled ? '\n- Get sprint information (active, future, closed)\n- Assign tickets to sprints automatically' : ''}${smartAssignment ? '\n- Fetch available team members and their workloads\n- Suggest optimal assignees based on context and expertise\n- Assign tickets to appropriate users automatically' : ''}` : 'JIRA capabilities are DISABLED - no organization/user context provided. You can only provide analysis and recommendations.'}
+- Handle embedded images in HTML emails and convert them to JIRA attachments${sprintsEnabled ? '\n- Get sprint information (active, future, closed)\n- Assign tickets to sprints automatically' : ''}${smartAssignment ? '\n- Fetch available team members and their workloads\n- Get intelligent assignee suggestions\n- Assign tickets to appropriate users automatically based on AI analysis' : ''}` : 'JIRA capabilities are DISABLED - no organization/user context provided. You can only provide analysis and recommendations.'}
 
 ## 📋 PROFESSIONAL JIRA TICKET FORMAT
 
-When creating tickets, use this industry-standard structure:
+When creating tickets, descriptions will be automatically converted from markdown to proper JIRA format (ADF). Use clear markdown formatting:
 
 **Summary**: Clear, actionable title (max 80 characters)
 
-**Description**: Use this professional format:
-\`\`\`
+**Description**: Use this professional markdown format:
+\`\`\`markdown
 ## Problem Statement
 [Describe the issue based ONLY on email content]
 
@@ -453,6 +484,26 @@ When creating tickets, use this industry-standard structure:
 **Component Selection** (only if clearly identifiable):
 - Frontend/UI, Backend/API, Database, Infrastructure, Authentication, etc.
 
+## 🎯 SMART ASSIGNMENT WORKFLOW
+
+${smartAssignment ? `When emails mention specific people or need assignment:
+
+1. **ALWAYS GET USERS FIRST**: Use get_project_users to fetch ALL available team members
+2. **ANALYZE EMAIL FOR NAMES**: Look for any names mentioned in the email (like "younes", "tell john to fix", "assign to sarah", etc.)
+3. **MATCH NAMES INTELLIGENTLY**: 
+   - Match partial names (e.g., "younes" could match "Younes Idrissi" or "younes.smith@company.com")
+   - Look in displayName, emailAddress, and username fields
+   - Use case-insensitive matching
+   - Consider common variations (e.g., "john" matches "John", "johnny", "johnathan")
+4. **GET SMART SUGGESTIONS**: Use suggest_assignee to get AI-powered assignment recommendations
+5. **MAKE ASSIGNMENT DECISION**: Based on:
+   - Explicit mentions in email ("tell younes to fix" → assign to younes)
+   - AI suggestions from suggest_assignee tool
+   - User availability and workload
+   - Ticket type and complexity
+
+**CRITICAL**: ALWAYS try to find and assign to that person. Search through the user list thoroughly!` : ''}
+
 IMPORTANT WORKFLOW - Follow this order:
 
 ${jiraAvailable ? `1. **FIRST ALWAYS SEARCH**: Before creating any new tickets, ALWAYS use read_jira_tickets to search for existing related tickets (search recent tickets from last 14-30 days)
@@ -471,17 +522,17 @@ ${sprintsEnabled ? '4.' : '3.'} **DECIDE ACTION BASED ON FINDINGS**:
 
 ${
   smartAssignment
-    ? `${sprintsEnabled ? '5.' : '4.'} **SMART ASSIGNMENT LOGIC**:
-   - **ALWAYS GET USERS FIRST**: Use get_project_users to fetch available team members
-   - **CHECK WORKLOADS**: Use get_user_workload to understand current team capacity  
-   - **ANALYZE EMAIL CONTEXT**: Look for mentions of specific people, technologies, or expertise areas
-   - **For Bug Reports**: Assign to developers with relevant expertise and lower workload
-   - **For Feature Requests**: Assign to product owners or senior developers based on capacity
-   - **For Support Issues**: Assign to support team members or generalists
-   - **For Infrastructure**: Assign to DevOps/Infrastructure team members
-   - **Email Context Clues**: If email mentions specific team members by name, strongly consider assigning to them
-   - **Technology Matching**: Match mentioned technologies (React, Node.js, Python, etc.) with developer expertise
-   - **Workload Balance**: Prefer users with lower current ticket counts and fewer story points`
+    ? `${sprintsEnabled ? '5.' : '4.'} **INTELLIGENT ASSIGNMENT PROCESS**:
+   - **GET ALL USERS**: Always use get_project_users first to see who's available
+   - **SEARCH FOR MENTIONED NAMES**: If email mentions names, search through users list carefully:
+     * Check displayName field for matches
+     * Check emailAddress for name patterns  
+     * Check username field
+     * Use partial matching (e.g., "younes" matches "Younes Idrissi")
+     * Be case-insensitive
+   - **GET AI SUGGESTIONS**: Use suggest_assignee with ticket context to get intelligent recommendations
+   - **MAKE FINAL DECISION**: Combine explicit mentions + AI suggestions + user availability
+   - **ASSIGN APPROPRIATELY**: Use the best match found`
     : ''
 }
 
@@ -503,7 +554,9 @@ ${sprintsEnabled ? '6.' : smartAssignment ? '5.' : '4.'} **ATTACHMENT HANDLING**
 - Don't interpret or expand on technical details
 - If email lacks specific information, acknowledge the gap
 
-Remember: You have access to email attachments and embedded images. Use them to provide better context and automatically attach them to JIRA tickets for complete documentation. Always be factual and never invent details not present in the source email.`;
+Remember: You have access to email attachments and embedded images. Use them to provide better context and automatically attach them to JIRA tickets for complete documentation. Always be factual and never invent details not present in the source email.
+
+**MOST IMPORTANT**: When someone is mentioned by name in an email (like "tell younes to fix"), ALWAYS use get_project_users to find that person and assign the ticket to them if found!`;
   }
 
   private buildUserPrompt(input: EmailProcessingInput): string {
@@ -1163,17 +1216,23 @@ Please analyze this email and take appropriate actions. Pay special attention to
     // Process attachments from the email
     const attachmentData = this.processEmailAttachments(emailInput.attachments, emailInput.htmlBody);
     
+    // Convert markdown description to ADF format
+    const adfDescription = this.convertMarkdownToAdf(args.description);
+    
     const newTicket = await this.jiraService.createTicket(jiraConfig, {
       summary: args.summary,
-      description: args.description,
+      description: args.description, // Keep original for fallback
+      adfDescription: adfDescription, // Pass ADF version
       issueType: args.issueType,
       priority: args.priority,
       assignee: args.assignee,
-      ...(sprintsEnabled && args.sprintId && { sprintId: args.sprintId }),
-      ...(sprintsEnabled && args.dueDate && { dueDate: args.dueDate }),
-      ...(attachmentData.processedAttachments.length > 0 && { 
+      labels: args.labels,
+      components: args.components,
+      ...(sprintsEnabled && args.sprintId ? { sprintId: args.sprintId } : {}),
+      ...(sprintsEnabled && args.dueDate ? { dueDate: args.dueDate } : {}),
+      ...(attachmentData.processedAttachments.length > 0 ? { 
         attachments: attachmentData.processedAttachments 
-      }),
+      } : {}),
     });
     
     return {
@@ -1265,17 +1324,42 @@ Please analyze this email and take appropriate actions. Pay special attention to
     };
   }
 
-  private async executeSuggestAssignee(jiraConfig: JiraConfiguration, args: any, _emailInput: EmailProcessingInput): Promise<any> {
-    const suggestion = await this.jiraService.suggestAssignee(
+  private async executeSuggestAssignee(jiraConfig: JiraConfiguration, args: any, emailInput: EmailProcessingInput): Promise<any> {
+    const suggestionData = await this.jiraService.suggestAssignee(
       jiraConfig,
       args.ticketType, 
       args.technologies || [], 
       args.priority || 'Medium', 
       args.component
     );
+    
+    // Also analyze the email for mentioned names to help AI make better decisions
+    const mentionedNames = this.extractMentionedUsers(`${emailInput.subject} ${emailInput.textBody}`);
+    
     return {
-      suggestion,
-      summary: `Generated assignee suggestions based on ticket context`,
+      availableUsers: suggestionData.users.map(user => ({
+        accountId: user.accountId,
+        displayName: user.displayName,
+        emailAddress: user.emailAddress,
+        username: user.username,
+        active: user.active,
+        roles: user.roles || [],
+        workload: suggestionData.workloads[user.accountId] || {
+          totalTickets: 0,
+          inProgressTickets: 0,
+          todoTickets: 0,
+          storyPoints: 0,
+          overdue: 0
+        }
+      })),
+      context: suggestionData.context,
+      emailContext: {
+        mentionedNames: mentionedNames,
+        from: emailInput.from,
+        subject: emailInput.subject,
+        bodySnippet: emailInput.textBody.substring(0, 200)
+      },
+      summary: `Retrieved ${suggestionData.users.length} available users with workload data for intelligent assignment decision`,
     };
   }
 
